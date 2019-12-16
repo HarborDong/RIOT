@@ -59,8 +59,11 @@ int rtc_set_time(struct tm *localt)
         return -1;
     }
 
+    /* normalize input */
+    rtc_tm_normalize(localt);
+
     /* copy time to be set */
-    memcpy(&time_to_set, localt, sizeof(struct tm));
+    time_to_set = *localt;
     set_time = 1;
     return 0;
 }
@@ -138,6 +141,9 @@ int rtc_set_alarm(struct tm *localt, rtc_alarm_cb_t cb, void *arg)
     (void)arg;
 
     if (localt != NULL) {
+        /* normalize input */
+        rtc_tm_normalize(localt);
+
         RTCAMIN = localt->tm_min;
         RTCAMIN |= BIT7;
         RTCAHOUR = localt->tm_hour;

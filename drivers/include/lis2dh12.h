@@ -9,6 +9,7 @@
 /**
  * @defgroup    drivers_lis2dh12 LIS2DH12 Accelerometer
  * @ingroup     drivers_sensors
+ * @ingroup     drivers_saul
  * @brief       Driver for the STM LIS2DH12 accelerometer
  *
  * This device driver provides a minimal interface to LIS2DH12 devices. As of
@@ -23,6 +24,8 @@
  * support is quite simple, as all bus related functions (acquire, release,
  * read, write) are cleanly separated in the code.
  *
+ * This driver provides @ref drivers_saul capabilities.
+ *
  * @{
  * @file
  * @brief       Interface definition for the STM LIS2DH12 accelerometer
@@ -33,17 +36,26 @@
 #ifndef LIS2DH12_H
 #define LIS2DH12_H
 
+#include <stdint.h>
+
 #include "saul.h"
+
+#ifdef MODULE_LIS2DH12_SPI
 #include "periph/spi.h"
 #include "periph/gpio.h"
+#else
+#include "periph/i2c.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* I2C support is not implemented (yet), so throw an error when selected */
-#ifndef MODULE_LIS2DH12_SPI
-#error "LIS2DH12 error: I2C mode is not supported, yet. Use module li2dh12_spi"
+#if defined(MODULE_LIS2DH12) || defined(DOXYGEN)
+/**
+ * @brief   Default I2C slave address for LIS2DH12 devices
+ */
+#define LIS2DH12_ADDR_DEFAULT       (0x19)
 #endif
 
 /**
@@ -76,8 +88,13 @@ typedef enum {
  * @brief   LIS2DH12 configuration parameters
  */
 typedef struct {
+#ifdef MODULE_LIS2DH12_SPI
     spi_t spi;                      /**< SPI bus the device is connected to */
     gpio_t cs;                      /**< connected chip select pin */
+#else
+    i2c_t i2c;                      /**< I2C bus the device is connected to */
+    uint8_t addr;                   /**< device address on the I2C bus */
+#endif
     lis2dh12_scale_t scale;         /**< sampling sensitivity used */
     lis2dh12_rate_t rate;           /**< sampling rate used */
 } lis2dh12_params_t;

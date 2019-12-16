@@ -7,7 +7,7 @@
  */
 
 /**
- * @ingroup     boards_hifive
+ * @ingroup     boards_hifive1
  * @{
  *
  * @file
@@ -27,12 +27,8 @@ extern "C" {
  * @name    Core Clock configuration
  * @{
  */
-#define CLOCK_CORECLOCK             (1600000ul)
-/*
- * #define CLOCK_CORECLOCK           (20000000ul)
- * #define CLOCK_CORECLOCK           (27000000ul)
- * #define CLOCK_CORECLOCK           (38400000ul)
- */
+/* As defined in boards/hifive1/board.c CPU_DESIRED_FREQ **/
+#define CLOCK_CORECLOCK             (200000000ul)
 /** @} */
 
 /**
@@ -58,12 +54,10 @@ extern "C" {
  *
  * @{
  */
-#define RTT_NUMOF                   (1)
 #define RTT_FREQUENCY               (1)             /* in Hz */
 #define RTT_MAX_VALUE               (0xFFFFFFFF)
 #define RTT_INTR_PRIORITY           (2)
 
-#define RTC_NUMOF                   (1)
 /** @} */
 
 /**

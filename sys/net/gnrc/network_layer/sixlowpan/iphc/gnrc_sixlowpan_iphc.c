@@ -19,17 +19,21 @@
 #include <stdbool.h>
 
 #include "byteorder.h"
-#include "net/ieee802154.h"
 #include "net/ipv6/hdr.h"
 #include "net/gnrc.h"
+#include "net/gnrc/netif/internal.h"
 #include "net/gnrc/sixlowpan.h"
 #include "net/gnrc/sixlowpan/ctx.h"
-#include "net/gnrc/sixlowpan/frag.h"
+#include "net/gnrc/sixlowpan/frag/rb.h"
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+#include "net/gnrc/sixlowpan/frag/vrb.h"
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
 #include "net/gnrc/sixlowpan/internal.h"
 #include "net/sixlowpan.h"
 #include "utlist.h"
 #include "net/gnrc/nettype.h"
 #include "net/gnrc/udp.h"
+#include "od.h"
 
 #include "net/gnrc/sixlowpan/iphc.h"
 
@@ -92,6 +96,12 @@
 #define NHC_UDP_8BIT_PORT           (0xF000)
 #define NHC_UDP_8BIT_MASK           (0xFF00)
 
+/* currently only used with forwarding output, remove guard if more debug info
+ * is added */
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+static char addr_str[IPV6_ADDR_MAX_STR_LEN];
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
+
 static inline bool _context_overlaps_iid(gnrc_sixlowpan_ctx_t *ctx,
                                          ipv6_addr_t *addr,
                                          eui64_t *iid)
@@ -113,15 +123,26 @@ static inline bool _context_overlaps_iid(gnrc_sixlowpan_ctx_t *ctx,
              (iid->uint8[(ctx->prefix_len / 8) - 8] & byte_mask[ctx->prefix_len % 8])));
 }
 
+static gnrc_pktsnip_t *_iphc_encode(gnrc_pktsnip_t *pkt,
+                                    const gnrc_netif_hdr_t *netif_hdr,
+                                    gnrc_netif_t *netif);
+
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+static gnrc_pktsnip_t *_encode_frag_for_forwarding(gnrc_pktsnip_t *decoded_pkt,
+                                                   gnrc_sixlowpan_frag_vrb_t *vrbe);
+static int _forward_frag(gnrc_pktsnip_t *pkt, gnrc_pktsnip_t *frag_hdr,
+                         gnrc_sixlowpan_frag_vrb_t *vrbe, unsigned page);
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
+
 #ifdef MODULE_GNRC_SIXLOWPAN_IPHC_NHC
 /**
  * @brief   Decodes UDP NHC
  *
- * @param[in] pkt                   The IPHC encoded packet
+ * @param[in] sixlo                 The IPHC encoded packet
  * @param[in] offset                The offset of the NHC encoded header
- * @param[in] ipv6_payload_len      Length of the unencoded, reassembled IPv6
- *                                  datagram in @p ipv6 with out the outer-most
- *                                  IPv6 header
+ * @param[in] rbuf                  Reassembly buffer entry if @p ipv6 is a
+ *                                  fragmented datagram. May be NULL, if @p ipv6
+ *                                  is not fragmented
  * @param[out] ipv6                 The packet to write the decoded data to
  * @param[in,out] uncomp_hdr_len    Number of bytes already decoded into @p ipv6
  *                                  by IPHC and other NHC. Adds size of @ref
@@ -132,13 +153,12 @@ static inline bool _context_overlaps_iid(gnrc_sixlowpan_ctx_t *ctx,
  * @return  0 on error.
  */
 static size_t _iphc_nhc_udp_decode(gnrc_pktsnip_t *sixlo, size_t offset,
+                                   const gnrc_sixlowpan_frag_rb_t *rbuf,
                                    gnrc_pktsnip_t *ipv6, size_t *uncomp_hdr_len)
 {
     uint8_t *payload = sixlo->data;
     ipv6_hdr_t *ipv6_hdr;
     udp_hdr_t *udp_hdr;
-    bool frag = true;   /* datagram is fragmented => infer payload length from
-                         * ipv6 snip (== reassembly buffer space) */
     uint16_t payload_len;
     uint8_t udp_nhc = payload[offset++];
     uint8_t tmp;
@@ -150,8 +170,6 @@ static size_t _iphc_nhc_udp_decode(gnrc_pktsnip_t *sixlo, size_t offset,
             DEBUG("6lo: unable to decode UDP NHC (not enough buffer space)\n");
             return 0;
         }
-        frag = false;   /* datagram was not fragmented => infer payload length
-                         * from original 6Lo packet*/
     }
     ipv6_hdr = ipv6->data;
     udp_hdr = (udp_hdr_t *)((uint8_t *)ipv6->data + *uncomp_hdr_len);
@@ -202,8 +220,8 @@ static size_t _iphc_nhc_udp_decode(gnrc_pktsnip_t *sixlo, size_t offset,
         udp_hdr->checksum.u8[1] = payload[offset++];
     }
 
-    if (frag) {
-        payload_len = ipv6->size - *uncomp_hdr_len;
+    if (rbuf != NULL) {
+        payload_len = rbuf->super.datagram_size - *uncomp_hdr_len;
     }
     else {
         payload_len = sixlo->size + sizeof(udp_hdr_t) - offset;
@@ -218,9 +236,9 @@ static size_t _iphc_nhc_udp_decode(gnrc_pktsnip_t *sixlo, size_t offset,
 
 static inline void _recv_error_release(gnrc_pktsnip_t *sixlo,
                                        gnrc_pktsnip_t *ipv6,
-                                       gnrc_sixlowpan_rbuf_t *rbuf) {
+                                       gnrc_sixlowpan_frag_rb_t *rbuf) {
     if (rbuf != NULL) {
-        gnrc_sixlowpan_frag_rbuf_remove(rbuf);
+        gnrc_sixlowpan_frag_rb_remove(rbuf);
     }
     gnrc_pktbuf_release(ipv6);
     gnrc_pktbuf_release(sixlo);
@@ -232,12 +250,16 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
     assert(sixlo != NULL);
     gnrc_pktsnip_t *ipv6, *netif;
     gnrc_netif_hdr_t *netif_hdr;
+    gnrc_netif_t *iface;
     ipv6_hdr_t *ipv6_hdr;
     uint8_t *iphc_hdr = sixlo->data;
     size_t payload_offset = SIXLOWPAN_IPHC_HDR_LEN;
     size_t uncomp_hdr_len = sizeof(ipv6_hdr_t);
     gnrc_sixlowpan_ctx_t *ctx = NULL;
-    gnrc_sixlowpan_rbuf_t *rbuf = rbuf_ptr;
+    gnrc_sixlowpan_frag_rb_t *rbuf = rbuf_ptr;
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+    gnrc_sixlowpan_frag_vrb_t *vrbe = NULL;
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
 
     if (rbuf != NULL) {
         ipv6 = rbuf->pkt;
@@ -331,6 +353,7 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
     netif = gnrc_pktsnip_search_type(sixlo, GNRC_NETTYPE_NETIF);
     assert(netif != NULL);
     netif_hdr = netif->data;
+    iface = gnrc_netif_hdr_get_netif(netif_hdr);
     switch (iphc_hdr[IPHC2_IDX] & (SIXLOWPAN_IPHC2_SAC | SIXLOWPAN_IPHC2_SAM)) {
 
         case IPHC_SAC_SAM_FULL:
@@ -354,9 +377,13 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
             break;
 
         case IPHC_SAC_SAM_L2:
-            ieee802154_get_iid((eui64_t *)(&ipv6_hdr->src.u64[1]),
-                               gnrc_netif_hdr_get_src_addr(netif_hdr),
-                               netif_hdr->src_l2addr_len);
+            if (gnrc_netif_hdr_ipv6_iid_from_src(
+                        iface, netif_hdr, (eui64_t *)(&ipv6_hdr->src.u64[1])
+                    ) < 0) {
+                DEBUG("6lo iphc: could not get source's IID\n");
+                _recv_error_release(sixlo, ipv6, rbuf);
+                return;
+            }
             ipv6_addr_set_link_local_prefix(&ipv6_hdr->src);
             break;
 
@@ -384,9 +411,13 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
 
         case IPHC_SAC_SAM_CTX_L2:
             assert(ctx != NULL);
-            ieee802154_get_iid((eui64_t *)(&ipv6_hdr->src.u64[1]),
-                               gnrc_netif_hdr_get_src_addr(netif_hdr),
-                               netif_hdr->src_l2addr_len);
+            if (gnrc_netif_hdr_ipv6_iid_from_src(
+                        iface, netif_hdr, (eui64_t *)(&ipv6_hdr->src.u64[1])
+                    ) < 0) {
+                DEBUG("6lo iphc: could not get source's IID\n");
+                _recv_error_release(sixlo, ipv6, rbuf);
+                return;
+            }
             ipv6_addr_init_prefix(&ipv6_hdr->src, &ctx->prefix,
                                   ctx->prefix_len);
             break;
@@ -433,13 +464,18 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
             break;
 
         case IPHC_M_DAC_DAM_U_L2:
-            ieee802154_get_iid((eui64_t *)(&ipv6_hdr->dst.u64[1]),
-                               gnrc_netif_hdr_get_dst_addr(netif_hdr),
-                               netif_hdr->dst_l2addr_len);
+            if (gnrc_netif_hdr_ipv6_iid_from_dst(
+                        iface, netif_hdr, (eui64_t *)(&ipv6_hdr->dst.u64[1])
+                    ) < 0) {
+                DEBUG("6lo iphc: could not get destination's IID\n");
+                _recv_error_release(sixlo, ipv6, rbuf);
+                return;
+            }
             ipv6_addr_set_link_local_prefix(&ipv6_hdr->dst);
             break;
 
         case IPHC_M_DAC_DAM_U_CTX_64:
+            assert(ctx != NULL);
             memcpy(ipv6_hdr->dst.u8 + 8, iphc_hdr + payload_offset, 8);
             ipv6_addr_init_prefix(&ipv6_hdr->dst, &ctx->prefix,
                                   ctx->prefix_len);
@@ -450,15 +486,21 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
             ipv6_hdr->dst.u32[2] = byteorder_htonl(0x000000ff);
             ipv6_hdr->dst.u16[6] = byteorder_htons(0xfe00);
             memcpy(ipv6_hdr->dst.u8 + 14, iphc_hdr + payload_offset, 2);
+            assert(ctx != NULL);
             ipv6_addr_init_prefix(&ipv6_hdr->dst, &ctx->prefix,
                                   ctx->prefix_len);
             payload_offset += 2;
             break;
 
         case IPHC_M_DAC_DAM_U_CTX_L2:
-            ieee802154_get_iid((eui64_t *)(&ipv6_hdr->dst.u64[1]),
-                               gnrc_netif_hdr_get_dst_addr(netif_hdr),
-                               netif_hdr->dst_l2addr_len);
+            if (gnrc_netif_hdr_ipv6_iid_from_dst(
+                        iface, netif_hdr, (eui64_t *)(&ipv6_hdr->dst.u64[1])
+                    ) < 0) {
+                DEBUG("6lo iphc: could not get destination's IID\n");
+                _recv_error_release(sixlo, ipv6, rbuf);
+                return;
+            }
+            assert(ctx != NULL);
             ipv6_addr_init_prefix(&ipv6_hdr->dst, &ctx->prefix,
                                   ctx->prefix_len);
             break;
@@ -491,6 +533,7 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
 
         case IPHC_M_DAC_DAM_M_UC_PREFIX:
             do {
+                assert(ctx != NULL);
                 uint8_t orig_ctx_len = ctx->prefix_len;
 
                 ipv6_addr_set_unspecified(&ipv6_hdr->dst);
@@ -523,7 +566,8 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
         switch (iphc_hdr[payload_offset] & NHC_ID_MASK) {
             case NHC_UDP_ID: {
                 payload_offset = _iphc_nhc_udp_decode(sixlo, payload_offset,
-                                                      ipv6, &uncomp_hdr_len);
+                                                      rbuf, ipv6,
+                                                      &uncomp_hdr_len);
                 if (payload_offset == 0) {
                     _recv_error_release(sixlo, ipv6, rbuf);
                     return;
@@ -538,7 +582,41 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
     uint16_t payload_len;
     if (rbuf != NULL) {
         /* for a fragmented datagram we know the overall length already */
-        payload_len = (uint16_t)(rbuf->pkt->size - sizeof(ipv6_hdr_t));
+        payload_len = (uint16_t)(rbuf->super.datagram_size - sizeof(ipv6_hdr_t));
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+        DEBUG("6lo iphc: VRB present, trying to create entry for dst %s\n",
+              ipv6_addr_to_str(addr_str, &ipv6_hdr->dst, sizeof(addr_str)));
+        /* re-assign IPv6 header in case realloc changed the address */
+        ipv6_hdr = ipv6->data;
+        /* only create virtual reassembly buffer entry from IPv6 destination if
+         * the current first fragment is the only received fragment in the
+         * reassembly buffer so far and the hop-limit is larger than 1
+         */
+        if ((rbuf->super.current_size <= sixlo->size) && (ipv6_hdr->hl > 1U) &&
+            /* and there is enough slack for changing compression */
+            (rbuf->super.current_size <= iface->sixlo.max_frag_size) &&
+            (vrbe = gnrc_sixlowpan_frag_vrb_from_route(&rbuf->super, iface,
+                                                       ipv6))) {
+            /* add netif header to `ipv6` so its flags can be used when
+             * forwarding the fragment */
+            LL_DELETE(sixlo, netif);
+            LL_APPEND(ipv6, netif);
+            /* provide space to copy remaining payload */
+            if (gnrc_pktbuf_realloc_data(ipv6, uncomp_hdr_len + sixlo->size -
+                                         payload_offset) != 0) {
+                DEBUG("6lo iphc: no space left to copy payload\n");
+                gnrc_sixlowpan_frag_vrb_rm(vrbe);
+                _recv_error_release(sixlo, ipv6, rbuf);
+                return;
+            }
+        }
+        /* reallocate to copy complete payload */
+        else if (gnrc_pktbuf_realloc_data(ipv6, rbuf->super.datagram_size) != 0) {
+            DEBUG("6lo iphc: no space left to reassemble payload\n");
+            _recv_error_release(sixlo, ipv6, rbuf);
+            return;
+        }
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
     }
     else {
         /* set IPv6 header payload length field to the length of whatever is left
@@ -559,8 +637,31 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
            ((uint8_t *)sixlo->data) + payload_offset,
            sixlo->size - payload_offset);
     if (rbuf != NULL) {
-        rbuf->current_size += (uncomp_hdr_len - payload_offset);
-        gnrc_sixlowpan_frag_rbuf_dispatch_when_complete(rbuf, netif_hdr);
+        rbuf->super.current_size += (uncomp_hdr_len - payload_offset);
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+        if (vrbe != NULL) {
+            int res = -1;
+            DEBUG("6lo iphc: found route, trying to forward\n");
+            ipv6_hdr->hl--;
+            vrbe->super.current_size = rbuf->super.current_size;
+            if ((ipv6 = _encode_frag_for_forwarding(ipv6, vrbe))) {
+                if ((res = _forward_frag(ipv6, sixlo->next, vrbe, page)) == 0) {
+                    DEBUG("6lo iphc: successfully recompressed and forwarded "
+                          "1st fragment\n");
+                    /* empty list, as it should be in VRB now */
+                    rbuf->super.ints = NULL;
+                }
+            }
+            if ((ipv6 == NULL) || (res < 0)) {
+                gnrc_sixlowpan_frag_vrb_rm(vrbe);
+            }
+            gnrc_pktbuf_release(sixlo);
+            /* don't remove `rbuf->pkt` (aka ipv6) as it was forwarded */
+            gnrc_sixlowpan_frag_rb_remove(rbuf);
+            return;
+        }
+        DEBUG("6lo iphc: no route found, reassemble datagram normally\n");
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
     }
     else {
         LL_DELETE(sixlo, netif);
@@ -571,87 +672,197 @@ void gnrc_sixlowpan_iphc_recv(gnrc_pktsnip_t *sixlo, void *rbuf_ptr,
     return;
 }
 
-#ifdef MODULE_GNRC_SIXLOWPAN_IPHC_NHC
-static inline size_t iphc_nhc_udp_encode(gnrc_pktsnip_t *udp, ipv6_hdr_t *ipv6_hdr)
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_VRB
+static gnrc_pktsnip_t *_encode_frag_for_forwarding(gnrc_pktsnip_t *decoded_pkt,
+                                                   gnrc_sixlowpan_frag_vrb_t *vrbe)
 {
-    udp_hdr_t *udp_hdr = udp->data;
-    network_uint16_t *src_port = &(udp_hdr->src_port);
-    network_uint16_t *dst_port = &(udp_hdr->dst_port);
-    uint8_t *udp_data = udp->data;
-    size_t nhc_len = 0;
+    gnrc_pktsnip_t *res;
+    gnrc_netif_hdr_t *netif_hdr;
 
-    /* TODO: Add support for elided checksum. */
+    /* mark IPv6 header to allow for next header compression */
+    res = gnrc_pktbuf_mark(decoded_pkt, sizeof(ipv6_hdr_t), GNRC_NETTYPE_IPV6);
+    if (res == NULL) {
+        DEBUG("6lo iphc: unable to mark IPv6 header for forwarding\n");
+        gnrc_pktbuf_release(decoded_pkt);
+        return NULL;
+    }
+    res = gnrc_pktbuf_reverse_snips(decoded_pkt);
+    if (res == NULL) {
+        DEBUG("6lo iphc: unable to reverse packet for forwarding\n");
+        /* decoded_pkt is released in gnrc_pktbuf_reverse_snips() */
+        return NULL;
+    }
+    /* set netif header from VRB for correct encoding */
+    netif_hdr = res->data;
+    /* _iphc_encode only checks the destination address, so leave src
+     * untouched */
+    netif_hdr->dst_l2addr_len = vrbe->super.dst_len;
+    gnrc_netif_hdr_set_dst_addr(netif_hdr, vrbe->super.dst,
+                                vrbe->super.dst_len);
+    gnrc_netif_hdr_set_netif(netif_hdr, vrbe->out_netif);
+    decoded_pkt = res;
+    if ((res = _iphc_encode(decoded_pkt, netif_hdr, vrbe->out_netif))) {
+        return res;
+    }
+    else {
+        DEBUG("6lo iphc: unable to compress packet for forwarding\n");
+        gnrc_pktbuf_release(decoded_pkt);
+        return NULL;
+    }
+}
 
+static int _forward_frag(gnrc_pktsnip_t *pkt, gnrc_pktsnip_t *frag_hdr,
+                         gnrc_sixlowpan_frag_vrb_t *vrbe, unsigned page)
+{
+    /* remove rewritten netif header (forwarding implementation must do this
+     * anyway) */
+    pkt = gnrc_pktbuf_remove_snip(pkt, pkt);
+    /* the following is just debug output for testing without any forwarding
+     * scheme */
+    DEBUG("6lo iphc: Do not know how to forward fragment from (%s, %u) ",
+          gnrc_netif_addr_to_str(vrbe->super.src, vrbe->super.src_len,
+                                 addr_str), vrbe->super.tag);
+    DEBUG("to (%s, %u)\n",
+          gnrc_netif_addr_to_str(vrbe->super.dst, vrbe->super.dst_len,
+                                 addr_str), vrbe->out_tag);
+#if ENABLE_DEBUG && defined(MODULE_OD)
+    DEBUG("Original fragmentation header:\n");
+    od_hex_dump(frag_hdr->data, frag_hdr->size, OD_WIDTH_DEFAULT);
+    DEBUG("IPHC headers + payload:\n");
+    frag_hdr = pkt;
+    while (frag_hdr) {
+        od_hex_dump(frag_hdr->data, frag_hdr->size, OD_WIDTH_DEFAULT);
+        frag_hdr = frag_hdr->next;
+    }
+#endif
+    gnrc_pktbuf_release(pkt);
+    (void)frag_hdr;
+    (void)page;
+    return -ENOTSUP;
+}
+#endif  /* MODULE_GNRC_SIXLOWPAN_FRAG_VRB */
+
+#ifdef MODULE_GNRC_SIXLOWPAN_IPHC_NHC
+static inline size_t iphc_nhc_udp_encode(uint8_t *nhc_data,
+                                         const gnrc_pktsnip_t *udp)
+{
+    const udp_hdr_t *udp_hdr = udp->data;
+    uint16_t src_port = byteorder_ntohs(udp_hdr->src_port);
+    uint16_t dst_port = byteorder_ntohs(udp_hdr->dst_port);
+    size_t nhc_len = 1; /* skip over NHC header */
+
+    /* Set UDP NHC header type
+     * (see https://tools.ietf.org/html/rfc6282#section-4.3). */
+    nhc_data[0] = NHC_UDP_ID;
     /* Compressing UDP ports, follow the same sequence as the linux kernel (nhc_udp module). */
-    if (((byteorder_ntohs(*src_port) & NHC_UDP_4BIT_MASK) == NHC_UDP_4BIT_PORT) &&
-        ((byteorder_ntohs(*dst_port) & NHC_UDP_4BIT_MASK) == NHC_UDP_4BIT_PORT)) {
+    if (((src_port & NHC_UDP_4BIT_MASK) == NHC_UDP_4BIT_PORT) &&
+        ((dst_port & NHC_UDP_4BIT_MASK) == NHC_UDP_4BIT_PORT)) {
         DEBUG("6lo iphc nhc: elide src and dst\n");
-        ipv6_hdr->nh = NHC_UDP_SD_ELIDED;
-        udp_data[nhc_len++] = byteorder_ntohs(*dst_port) - NHC_UDP_4BIT_PORT +
-                              ((byteorder_ntohs(*src_port) - NHC_UDP_4BIT_PORT) << 4);
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[0];
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[1];
+        nhc_data[0] |= NHC_UDP_SD_ELIDED;
+        nhc_data[nhc_len++] = dst_port - NHC_UDP_4BIT_PORT +
+                              ((src_port - NHC_UDP_4BIT_PORT) << 4);
     }
-    else if ((byteorder_ntohs(*dst_port) & NHC_UDP_8BIT_MASK) == NHC_UDP_8BIT_PORT) {
+    else if ((dst_port & NHC_UDP_8BIT_MASK) == NHC_UDP_8BIT_PORT) {
         DEBUG("6lo iphc nhc: elide dst\n");
-        ipv6_hdr->nh = NHC_UDP_S_INLINE;
-        nhc_len += 2; /* keep src_port */
-        udp_data[nhc_len++] = byteorder_ntohs(*dst_port) - NHC_UDP_8BIT_PORT;
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[0];
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[1];
+        nhc_data[0] |= NHC_UDP_S_INLINE;
+        nhc_data[nhc_len++] = udp_hdr->src_port.u8[0];
+        nhc_data[nhc_len++] = udp_hdr->src_port.u8[1];
+        nhc_data[nhc_len++] = dst_port - NHC_UDP_8BIT_PORT;
     }
-    else if ((byteorder_ntohs(*src_port) & NHC_UDP_8BIT_MASK) == NHC_UDP_8BIT_PORT) {
+    else if ((src_port & NHC_UDP_8BIT_MASK) == NHC_UDP_8BIT_PORT) {
         DEBUG("6lo iphc nhc: elide src\n");
-        ipv6_hdr->nh = NHC_UDP_D_INLINE;
-        udp_data[nhc_len++] = byteorder_ntohs(*src_port) - NHC_UDP_8BIT_PORT;
-        udp_data[nhc_len++] = udp_hdr->dst_port.u8[0];
-        udp_data[nhc_len++] = udp_hdr->dst_port.u8[1];
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[0];
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[1];
+        nhc_data[0] |= NHC_UDP_D_INLINE;
+        nhc_data[nhc_len++] = src_port - NHC_UDP_8BIT_PORT;
+        nhc_data[nhc_len++] = udp_hdr->dst_port.u8[0];
+        nhc_data[nhc_len++] = udp_hdr->dst_port.u8[1];
     }
     else {
         DEBUG("6lo iphc nhc: src and dst inline\n");
-        ipv6_hdr->nh = NHC_UDP_SD_INLINE;
-        nhc_len = sizeof(udp_hdr_t) - 4; /* skip src + dst and elide length */
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[0];
-        udp_data[nhc_len++] = udp_hdr->checksum.u8[1];
+        nhc_data[0] |= NHC_UDP_SD_INLINE;
+        nhc_data[nhc_len++] = udp_hdr->src_port.u8[0];
+        nhc_data[nhc_len++] = udp_hdr->src_port.u8[1];
+        nhc_data[nhc_len++] = udp_hdr->dst_port.u8[0];
+        nhc_data[nhc_len++] = udp_hdr->dst_port.u8[1];
     }
 
-    /* Set UDP header ID (rfc6282#section-5). */
-    ipv6_hdr->nh |= NHC_UDP_ID;
-
-    /* In case payload is in this snip (e.g. a forwarded packet):
-     * move data to right place */
-    size_t diff = sizeof(udp_hdr_t) - nhc_len;
-    for (size_t i = nhc_len; i < (udp->size - diff); i++) {
-      udp_data[i] = udp_data[i + diff];
-    }
-    /* NOTE: gnrc_pktbuf_realloc_data overflow if (udp->size - diff) < 4 */
-    gnrc_pktbuf_realloc_data(udp, (udp->size - diff));
+    /* TODO: Add support for elided checksum. */
+    nhc_data[nhc_len++] = udp_hdr->checksum.u8[0];
+    nhc_data[nhc_len++] = udp_hdr->checksum.u8[1];
 
     return nhc_len;
 }
 #endif
 
-void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
+static inline bool _compressible(gnrc_pktsnip_t *hdr)
+{
+    switch (hdr->type) {
+        case GNRC_NETTYPE_UNDEF:    /* when forwarded */
+        case GNRC_NETTYPE_IPV6:
+#if defined(MODULE_GNRC_SIXLOWPAN_IPHC_NHC) && defined(MODULE_GNRC_UDP)
+        case GNRC_NETTYPE_UDP:
+#endif
+            return true;
+        default:
+            return false;
+    }
+}
+
+static gnrc_pktsnip_t *_iphc_encode(gnrc_pktsnip_t *pkt,
+                                    const gnrc_netif_hdr_t *netif_hdr,
+                                    gnrc_netif_t *iface)
 {
     assert(pkt != NULL);
-    gnrc_netif_hdr_t *netif_hdr = pkt->data;
-    ipv6_hdr_t *ipv6_hdr = pkt->next->data;
+    ipv6_hdr_t *ipv6_hdr;
     uint8_t *iphc_hdr;
     gnrc_sixlowpan_ctx_t *src_ctx = NULL, *dst_ctx = NULL;
-    gnrc_pktsnip_t *dispatch = gnrc_pktbuf_add(NULL, NULL, pkt->next->size,
-                                               GNRC_NETTYPE_SIXLOWPAN);
-    bool addr_comp = false, nhc_comp = false;
-    /* datagram size before compression */
-    size_t orig_datagram_size = gnrc_pkt_len(pkt->next);
+    gnrc_pktsnip_t *dispatch, *ptr = pkt->next;
+    bool addr_comp = false;
+    size_t dispatch_size = 0;
     uint16_t inline_pos = SIXLOWPAN_IPHC_HDR_LEN;
 
-    (void)ctx;
+    assert(iface != NULL);
+    dispatch = NULL;    /* use dispatch as temporary pointer for prev */
+    /* determine maximum dispatch size and write protect all headers until
+     * then because they will be removed */
+    while ((ptr != NULL) && _compressible(ptr)) {
+        gnrc_pktsnip_t *tmp = gnrc_pktbuf_start_write(ptr);
+
+        if (tmp == NULL) {
+            DEBUG("6lo iphc: unable to write protect compressible header\n");
+            return NULL;
+        }
+        ptr = tmp;
+        if (dispatch == NULL) {
+            /* pkt was already write protected in gnrc_sixlowpan.c:_send so
+             * we shouldn't do it again */
+            pkt->next = ptr;    /* reset original packet */
+        }
+        else {
+            dispatch->next = ptr;
+        }
+        if (ptr->type == GNRC_NETTYPE_UNDEF) {
+            /* most likely UDP for now so use that (XXX: extend if extension
+             * headers make problems) */
+            dispatch_size += sizeof(udp_hdr_t);
+            break;  /* nothing special after UDP so quit even if more UNDEF
+                     * come */
+        }
+        else {
+            dispatch_size += ptr->size;
+        }
+        dispatch = ptr; /* use dispatch as temporary point for prev */
+        ptr = ptr->next;
+    }
+    /* there should be at least one compressible header in `pkt`, otherwise this
+     * function should not be called */
+    assert(dispatch_size > 0);
+    ipv6_hdr = pkt->next->data;
+    dispatch = gnrc_pktbuf_add(NULL, NULL, dispatch_size,
+                               GNRC_NETTYPE_SIXLOWPAN);
+
     if (dispatch == NULL) {
         DEBUG("6lo iphc: error allocating dispatch space\n");
-        gnrc_pktbuf_release(pkt);
-        return;
+        return NULL;
     }
 
     iphc_hdr = dispatch->data;
@@ -724,13 +935,11 @@ void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
         iphc_hdr[inline_pos++] = (uint8_t)((ipv6_hdr_get_fl(ipv6_hdr) & 0x000000ff) >> 8);
     }
 
-    /* compress next header */
+    /* check for compressible next header */
     switch (ipv6_hdr->nh) {
 #ifdef MODULE_GNRC_SIXLOWPAN_IPHC_NHC
         case PROTNUM_UDP:
-            iphc_nhc_udp_encode(pkt->next->next, ipv6_hdr);
             iphc_hdr[IPHC1_IDX] |= SIXLOWPAN_IPHC1_NH;
-            nhc_comp = true;
             break;
 #endif
 
@@ -776,18 +985,13 @@ void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
             eui64_t iid;
             iid.uint64.u64 = 0;
 
-            if ((netif_hdr->src_l2addr_len == 2) ||
-                (netif_hdr->src_l2addr_len == 4) ||
-                (netif_hdr->src_l2addr_len == 8)) {
-                /* prefer to create IID from netif header if available */
-                ieee802154_get_iid(&iid, gnrc_netif_hdr_get_src_addr(netif_hdr),
-                                   netif_hdr->src_l2addr_len);
+            gnrc_netif_acquire(iface);
+            if (gnrc_netif_ipv6_get_iid(iface, &iid) < 0) {
+                DEBUG("6lo iphc: could not get interface's IID\n");
+                gnrc_netif_release(iface);
+                return NULL;
             }
-            else {
-                /* but take from driver otherwise */
-                gnrc_netapi_get(netif_hdr->if_pid, NETOPT_IPV6_IID, 0, &iid,
-                                sizeof(eui64_t));
-            }
+            gnrc_netif_release(iface);
 
             if ((ipv6_hdr->src.u64[1].u64 == iid.uint64.u64) ||
                 _context_overlaps_iid(src_ctx, &ipv6_hdr->src, &iid)) {
@@ -901,8 +1105,10 @@ void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
             }
         }
 
-        ieee802154_get_iid(&iid, gnrc_netif_hdr_get_dst_addr(netif_hdr),
-                           netif_hdr->dst_l2addr_len);
+        if (gnrc_netif_hdr_ipv6_iid_from_dst(iface, netif_hdr, &iid) < 0) {
+            DEBUG("6lo iphc: could not get destination's IID\n");
+            return NULL;
+        }
 
         if ((ipv6_hdr->dst.u64[1].u64 == iid.uint64.u64) ||
             _context_overlaps_iid(dst_ctx, &(ipv6_hdr->dst), &iid)) {
@@ -934,9 +1140,31 @@ void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
         inline_pos += 16;
     }
 
-    if (nhc_comp) {
-        iphc_hdr[inline_pos++] = ipv6_hdr->nh;
+#ifdef MODULE_GNRC_SIXLOWPAN_IPHC_NHC
+    switch (ipv6_hdr->nh) {
+        case PROTNUM_UDP: {
+            gnrc_pktsnip_t *udp = pkt->next->next;
+
+            assert(udp->size >= sizeof(udp_hdr_t));
+            inline_pos += iphc_nhc_udp_encode(&iphc_hdr[inline_pos], udp);
+            /* remove UDP header */
+            if (udp->size > sizeof(udp_hdr_t)) {
+                udp = gnrc_pktbuf_mark(udp, sizeof(udp_hdr_t),
+                                       GNRC_NETTYPE_UNDEF);
+
+                if (udp == NULL) {
+                    DEBUG("gnrc_sixlowpan_iphc_encode: unable to mark UDP header\n");
+                    gnrc_pktbuf_release(dispatch);
+                    return NULL;
+                }
+            }
+            gnrc_pktbuf_remove_snip(pkt, udp);
+            break;
+        }
+        default:
+            break;
     }
+#endif
 
     /* shrink dispatch allocation to final size */
     /* NOTE: Since this only shrinks the data nothing bad SHOULD happen ;-) */
@@ -948,10 +1176,24 @@ void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
     /* insert dispatch into packet */
     dispatch->next = pkt->next;
     pkt->next = dispatch;
+    return pkt;
+}
 
-    gnrc_netif_t *netif = gnrc_netif_get_by_pid(netif_hdr->if_pid);
-    assert(netif != NULL);
-    gnrc_sixlowpan_multiplex_by_size(pkt, orig_datagram_size, netif, page);
+void gnrc_sixlowpan_iphc_send(gnrc_pktsnip_t *pkt, void *ctx, unsigned page)
+{
+    gnrc_netif_hdr_t *netif_hdr = pkt->data;
+    gnrc_netif_t *netif = gnrc_netif_hdr_get_netif(netif_hdr);
+    gnrc_pktsnip_t *tmp;
+    /* datagram size before compression */
+    size_t orig_datagram_size = gnrc_pkt_len(pkt->next);
+
+    (void)ctx;
+    if ((tmp = _iphc_encode(pkt, pkt->data, netif))) {
+        gnrc_sixlowpan_multiplex_by_size(tmp, orig_datagram_size, netif, page);
+    }
+    else {
+        gnrc_pktbuf_release(pkt);
+    }
 }
 
 /** @} */

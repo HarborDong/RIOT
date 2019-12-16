@@ -29,6 +29,22 @@ extern "C" {
 #endif
 
 /**
+ * @brief   Override the default initial PM blocker
+ * @todo   Idle modes are enabled by default, deep sleep mode blocked
+ */
+#define PM_BLOCKER_INITIAL  { .val_u32 = 0x00000001 }
+
+/**
+ * @name   SAMD21 sleep modes for PM
+ * @{
+ */
+#define SAMD21_PM_STANDBY       (0U)    /**< Standby mode (stops main clock) */
+#define SAMD21_PM_IDLE_2        (1U)    /**< Idle 2 (stops AHB, APB and CPU) */
+#define SAMD21_PM_IDLE_1        (2U)    /**< Idle 1 (stops AHB and CPU)      */
+#define SAMD21_PM_IDLE_0        (3U)    /**< Idle 0 (stops CPU)              */
+/** @} */
+
+/**
  * @brief   Mapping of pins to EXTI lines, -1 means not EXTI possible
  */
 static const int8_t exti_config[2][32] = {
@@ -93,6 +109,7 @@ static inline int _sercom_id(SercomUsart *sercom)
     return ((((uint32_t)sercom) >> 10) & 0x7) - 2;
 }
 
+#ifndef DOXYGEN
 /**
  * @brief   Override the ADC resolution configuration
  * @{
@@ -107,6 +124,7 @@ typedef enum {
     ADC_RES_16BIT = 0xfd                        /**< not supported */
 } adc_res_t;
 /** @} */
+#endif /* ndef DOXYGEN */
 #ifdef __cplusplus
 }
 #endif

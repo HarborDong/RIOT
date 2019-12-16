@@ -7,12 +7,14 @@
  */
 
 /**
+ * @defgroup    core_sync_rmutex Recursive Mutex
  * @ingroup     core_sync
  * @brief       Recursive Mutex for thread synchronization
+ *
  * @{
  *
  * @file
- * @brief       RIOT synchronization API
+ * @brief       Recursive Mutex for thread synchronization
  *
  * @author      Martin Elshuber <martin.elshuber@theobroma-systems.com>
  *
@@ -22,7 +24,11 @@
 #define RMUTEX_H
 
 #include <stdint.h>
+#ifdef __cplusplus
+#include "c11_atomics_compat.hpp"
+#else
 #include <stdatomic.h>
+#endif
 
 #include "mutex.h"
 #include "kernel_types.h"

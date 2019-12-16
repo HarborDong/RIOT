@@ -16,6 +16,7 @@
  */
 
 #include <errno.h>
+#include <string.h>
 
 #include "byteorder.h"
 #include "net/af.h"
@@ -119,8 +120,9 @@ ssize_t sock_ip_recv(sock_ip_t *sock, void *data, size_t max_len,
         return -EPROTO;
     }
     memcpy(data, pkt->data, pkt->size);
+    res = (int)pkt->size;
     gnrc_pktbuf_release(pkt);
-    return (int)pkt->size;
+    return res;
 }
 
 ssize_t sock_ip_send(sock_ip_t *sock, const void *data, size_t len,
@@ -193,7 +195,26 @@ ssize_t sock_ip_send(sock_ip_t *sock, const void *data, size_t len,
     if (res <= 0) {
         return res;
     }
+#ifdef SOCK_HAS_ASYNC
+    if ((sock != NULL) && (sock->reg.async_cb.ip)) {
+        sock->reg.async_cb.ip(sock, SOCK_ASYNC_MSG_SENT);
+    }
+#endif  /* SOCK_HAS_ASYNC */
     return res;
 }
+
+#ifdef SOCK_HAS_ASYNC
+void sock_ip_set_cb(sock_ip_t *sock, sock_ip_cb_t cb)
+{
+    sock->reg.async_cb.ip = cb;
+}
+
+#ifdef SOCK_HAS_ASYNC_CTX
+sock_async_ctx_t *sock_ip_get_async_ctx(sock_ip_t *sock)
+{
+    return &sock->reg.async_ctx;
+}
+#endif  /* SOCK_HAS_ASYNC_CTX */
+#endif  /* SOCK_HAS_ASYNC */
 
 /** @} */

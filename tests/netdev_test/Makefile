@@ -4,11 +4,7 @@
 CFLAGS += -DNDEBUG
 include ../Makefile.tests_common
 
-BOARD_INSUFFICIENT_MEMORY := nucleo-f031k6
-
 DISABLE_MODULE = auto_init
-
-FEATURES_REQUIRED += periph_timer # xtimer required for this application
 
 USEMODULE += gnrc
 USEMODULE += gnrc_neterr
@@ -19,9 +15,4 @@ USEMODULE += od
 
 CFLAGS += -DGNRC_PKTBUF_SIZE=200
 
-TEST_ON_CI_WHITELIST += all
-
 include $(RIOTBASE)/Makefile.include
-
-test:
-	tests/01-run.py

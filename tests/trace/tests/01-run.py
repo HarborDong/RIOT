@@ -6,20 +6,18 @@
 # General Public License v2.1. See the file LICENSE in the top level
 # directory for more details.
 
-import os
 import sys
+from testrunner import run
 
 
 def testfunc(child):
-    child.expect(r"TRACE_SIZE: (\d+)")
+    child.expect(r"TRACE_SIZE: (\d+)\r\n")
     trace_size = int(child.match.group(1))
     for i in range(trace_size):
-        child.expect("0x[0-9a-f]{7,8}")
+        child.expect(r"0x[0-9a-f]{7,8}")
 
     print("All tests successful")
 
 
 if __name__ == "__main__":
-    sys.path.append(os.path.join(os.environ['RIOTTOOLS'], 'testrunner'))
-    import testrunner
-    sys.exit(testrunner.run(testfunc, timeout=1, echo=True, traceback=True))
+    sys.exit(run(testfunc, timeout=1, echo=True, traceback=True))

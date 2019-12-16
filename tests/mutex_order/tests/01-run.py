@@ -7,8 +7,9 @@
 # General Public License v2.1. See the file LICENSE in the top level
 # directory for more details.
 
-import os
 import sys
+from testrunner import run
+
 
 thread_prio = {
         3:  6,
@@ -21,16 +22,15 @@ thread_prio = {
 
 def testfunc(child):
     for k in thread_prio.keys():
-        child.expect(u"T%i \(prio %i\): trying to lock mutex now" % (k, thread_prio[k]))
+        child.expect_exact("T{} (prio {}): trying to lock mutex now"
+                           .format(k, thread_prio[k]))
 
     last = -1
     for i in range(len(thread_prio)):
-        child.expect(u"T\d+ \(prio (\d+)\): locked mutex now")
+        child.expect(r"T\d+ \(prio (\d+)\): locked mutex now")
         assert(int(child.match.group(1)) > last)
         last = int(child.match.group(1))
 
 
 if __name__ == "__main__":
-    sys.path.append(os.path.join(os.environ['RIOTTOOLS'], 'testrunner'))
-    from testrunner import run
     sys.exit(run(testfunc))

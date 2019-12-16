@@ -34,8 +34,14 @@
 #include "net/gnrc/netapi.h"
 #include "net/gnrc/pkt.h"
 #include "net/gnrc/netif/conf.h"
+#ifdef MODULE_GNRC_LORAWAN
+#include "net/gnrc/netif/lorawan.h"
+#endif
 #ifdef MODULE_GNRC_SIXLOWPAN
 #include "net/gnrc/netif/6lo.h"
+#endif
+#if defined(MODULE_GNRC_NETIF_DEDUP) && (GNRC_NETIF_L2ADDR_MAXLEN > 0)
+#include "net/gnrc/netif/dedup.h"
 #endif
 #include "net/gnrc/netif/flags.h"
 #ifdef MODULE_GNRC_IPV6
@@ -44,8 +50,14 @@
 #ifdef MODULE_GNRC_MAC
 #include "net/gnrc/netif/mac.h"
 #endif
+#include "net/ndp.h"
 #include "net/netdev.h"
+#include "net/netopt.h"
+#ifdef MODULE_NETSTATS_L2
+#include "net/netstats.h"
+#endif
 #include "rmutex.h"
+#include "net/netif.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,9 +72,16 @@ typedef struct gnrc_netif_ops gnrc_netif_ops_t;
  * @brief   Representation of a network interface
  */
 typedef struct {
+    netif_t netif;                          /**< network interface descriptor */
     const gnrc_netif_ops_t *ops;            /**< Operations of the network interface */
     netdev_t *dev;                          /**< Network device of the network interface */
     rmutex_t mutex;                         /**< Mutex of the interface */
+#ifdef MODULE_NETSTATS_L2
+    netstats_t stats;                       /**< transceiver's statistics */
+#endif
+#if defined(MODULE_GNRC_LORAWAN) || DOXYGEN
+    gnrc_netif_lorawan_t lorawan;           /**< LoRaWAN component */
+#endif
 #if defined(MODULE_GNRC_IPV6) || DOXYGEN
     gnrc_netif_ipv6_t ipv6;                 /**< IPv6 component */
 #endif
@@ -75,7 +94,7 @@ typedef struct {
      * @see net_gnrc_netif_flags
      */
     uint32_t flags;
-#if (GNRC_NETIF_L2ADDR_MAXLEN > 0)
+#if (GNRC_NETIF_L2ADDR_MAXLEN > 0) || DOXYGEN
     /**
      * @brief   The link-layer address currently used as the source address
      *          on this interface.
@@ -90,6 +109,14 @@ typedef struct {
      * @note    Only available if @ref GNRC_NETIF_L2ADDR_MAXLEN > 0
      */
     uint8_t l2addr_len;
+#if defined(MODULE_GNRC_NETIF_DEDUP) || DOXYGEN
+    /**
+     * @brief   Last received packet information
+     *
+     * @note    Only available with @ref net_gnrc_netif_dedup.
+     */
+    gnrc_netif_dedup_t last_pkt;
+#endif
 #endif
 #if defined(MODULE_GNRC_SIXLOWPAN) || DOXYGEN
     gnrc_netif_6lo_t sixlo;                 /**< 6Lo component */
@@ -110,10 +137,13 @@ struct gnrc_netif_ops {
      *
      * @param[in] netif The network interface.
      *
-     * This is called after the default settings were set, right before the
-     * interface's thread starts receiving messages. It is not necessary to lock
-     * the interface's mutex gnrc_netif_t::mutex, since the thread will already
-     * lock it. Leave NULL if you do not need any special initialization.
+     * This is called after the network device's initial configuration, right
+     * before the interface's thread starts receiving messages. It is not
+     * necessary to lock the interface's mutex gnrc_netif_t::mutex, since it is
+     * already locked. Set to @ref gnrc_netif_default_init() if you do not need
+     * any special initialization. If you do need special initialization, it is
+     * recommended to call @ref gnrc_netif_default_init() at the start of the
+     * custom initialization function set here.
      */
     void (*init)(gnrc_netif_t *netif);
 
@@ -254,7 +284,7 @@ gnrc_netif_t *gnrc_netif_iter(const gnrc_netif_t *prev);
 gnrc_netif_t *gnrc_netif_get_by_pid(kernel_pid_t pid);
 
 /**
- * @brief   Gets the (unicast on anycast) IPv6 addresss of an interface (if IPv6
+ * @brief   Gets the (unicast on anycast) IPv6 address of an interface (if IPv6
  *          is supported)
  *
  * @pre `netif != NULL`
@@ -412,6 +442,15 @@ static inline int gnrc_netif_ipv6_group_leave(const gnrc_netif_t *netif,
     return gnrc_netapi_set(netif->pid, NETOPT_IPV6_GROUP_LEAVE, 0, group,
                            sizeof(ipv6_addr_t));
 }
+
+/**
+ * @brief   Default operation for gnrc_netif_ops_t::init()
+ *
+ * @note    Can also be used to be called *before* a custom operation.
+ *
+ * @param[in] netif     The network interface.
+ */
+void gnrc_netif_default_init(gnrc_netif_t *netif);
 
 /**
  * @brief   Default operation for gnrc_netif_ops_t::get()

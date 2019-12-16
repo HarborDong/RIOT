@@ -31,7 +31,9 @@
 
 
 /**
- * @ingroup     sys_hashes
+ * @defgroup    sys_hashes_sha256 SHA-256
+ * @ingroup     sys_hashes_unkeyed
+ * @brief       Implementation of the SHA-256 hashing function
  * @{
  *
  * @file
@@ -47,11 +49,15 @@
 #define HASHES_SHA256_H
 
 #include <inttypes.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/**
+ * @brief   Length of SHA256 digests in bytes
+ */
 #define SHA256_DIGEST_LENGTH 32
 
 /**
@@ -118,7 +124,7 @@ void sha256_final(sha256_context_t *ctx, void *digest);
 
 /**
  * @brief A wrapper function to simplify the generation of a hash, this is
- * usefull for generating sha256 for one buffer
+ * useful for generating sha256 for one buffer
  *
  * @param[in] data   pointer to the buffer to generate hash from
  * @param[in] len    length of the buffer
@@ -170,7 +176,7 @@ const void *hmac_sha256(const void *key, size_t key_length,
                         const void *data, size_t len, void *digest);
 
 /**
- * @brief function to produce a hash chain statring with a given seed element.
+ * @brief function to produce a hash chain starting with a given seed element.
  *        The chain is computed by taking the sha256 from the seed,
  *        hash the resulting sha256 and continuing taking sha256
  *        from each result consecutively.
@@ -187,7 +193,7 @@ void *sha256_chain(const void *seed, size_t seed_length,
                    size_t elements, void *tail_element);
 
 /**
- * @brief function to produce a hash chain statring with a given seed element.
+ * @brief function to produce a hash chain starting with a given seed element.
  *        The chain is computed the same way as done with sha256_chain().
  *        Additionally intermediate elements are saved while computing the chain.
  *        This slows down computation, but provides the caller with indexed

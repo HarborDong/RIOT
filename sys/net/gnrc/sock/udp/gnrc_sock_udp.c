@@ -16,6 +16,7 @@
  */
 
 #include <errno.h>
+#include <string.h>
 
 #include "byteorder.h"
 #include "net/af.h"
@@ -214,8 +215,9 @@ ssize_t sock_udp_recv(sock_udp_t *sock, void *data, size_t max_len,
         return -EPROTO;
     }
     memcpy(data, pkt->data, pkt->size);
+    res = (int)pkt->size;
     gnrc_pktbuf_release(pkt);
-    return (int)pkt->size;
+    return res;
 }
 
 ssize_t sock_udp_send(sock_udp_t *sock, const void *data, size_t len,
@@ -315,7 +317,26 @@ ssize_t sock_udp_send(sock_udp_t *sock, const void *data, size_t len,
     if (res > 0) {
         res -= sizeof(udp_hdr_t);
     }
+#ifdef SOCK_HAS_ASYNC
+    if ((sock != NULL) && (sock->reg.async_cb.udp)) {
+        sock->reg.async_cb.udp(sock, SOCK_ASYNC_MSG_SENT);
+    }
+#endif  /* SOCK_HAS_ASYNC */
     return res;
 }
+
+#ifdef SOCK_HAS_ASYNC
+void sock_udp_set_cb(sock_udp_t *sock, sock_udp_cb_t cb)
+{
+    sock->reg.async_cb.udp = cb;
+}
+
+#ifdef SOCK_HAS_ASYNC_CTX
+sock_async_ctx_t *sock_udp_get_async_ctx(sock_udp_t *sock)
+{
+    return &sock->reg.async_ctx;
+}
+#endif  /* SOCK_HAS_ASYNC_CTX */
+#endif  /* SOCK_HAS_ASYNC */
 
 /** @} */

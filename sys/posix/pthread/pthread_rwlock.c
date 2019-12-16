@@ -191,7 +191,7 @@ static int pthread_rwlock_timedlock(pthread_rwlock_t *rwlock,
     uint64_t then = ((uint64_t)abstime->tv_sec * US_PER_SEC) +
                     (abstime->tv_nsec / NS_PER_US);
 
-    if ((then - now) <= 0) {
+    if (now >= then) {
         return ETIMEDOUT;
     }
     else {
@@ -261,7 +261,7 @@ int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
     }
 
     if (rwlock->readers != 0 || rwlock->queue.first == NULL) {
-        /* this thread was not the last reader, or no one is waiting to aquire the lock */
+        /* this thread was not the last reader, or no one is waiting to acquire the lock */
         DEBUG("Thread %" PRIkernel_pid ": pthread_rwlock_%s(): no one is waiting\n", thread_getpid(), "unlock");
         mutex_unlock(&rwlock->mutex);
         return 0;

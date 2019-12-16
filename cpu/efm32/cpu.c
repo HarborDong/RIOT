@@ -22,6 +22,7 @@
 #include "cpu.h"
 #include "periph_conf.h"
 #include "periph/init.h"
+#include "stdio_base.h"
 
 #include "em_chip.h"
 #include "em_cmu.h"
@@ -50,15 +51,21 @@
 #define EMU_EM4INIT         EMU_EM4INIT_DEFAULT
 #endif
 
+#ifndef RIOTBOOT
+
 #ifdef _SILICON_LABS_32B_SERIES_1
 /**
  * @brief   Initialize integrated DC-DC regulator
  */
 static void dcdc_init(void)
 {
+#ifdef EMU_DCDCINIT_OFF
+    EMU_DCDCPowerOff();
+#else
     EMU_DCDCInit_TypeDef init_dcdc = EMU_DCDCINIT;
 
     EMU_DCDCInit(&init_dcdc);
+#endif
 }
 #endif
 
@@ -149,13 +156,19 @@ static void pm_init(void)
 #endif
 }
 
+#endif
+
 void cpu_init(void)
 {
+#ifndef RIOTBOOT
     /* apply errata that may be applicable (see em_chip.h) */
     CHIP_Init();
+#endif
 
     /* initialize the Cortex-M core */
     cortexm_init();
+
+#ifndef RIOTBOOT
 
 #ifdef _SILICON_LABS_32B_SERIES_1
     /* initialize dc-dc */
@@ -168,6 +181,10 @@ void cpu_init(void)
     /* initialize power management interface */
     pm_init();
 
+    /* initialize stdio prior to periph_init() to allow use of DEBUG() there */
+    stdio_init();
+
     /* trigger static peripheral initialization */
     periph_init();
+#endif
 }

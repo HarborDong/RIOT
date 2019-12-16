@@ -29,7 +29,6 @@ int gnrc_ipv6_nib_pl_set(unsigned iface,
                          const ipv6_addr_t *pfx, unsigned pfx_len,
                          uint32_t valid_ltime, uint32_t pref_ltime)
 {
-    int res = 0;
     _nib_offl_entry_t *dst;
     ipv6_addr_t tmp = IPV6_ADDR_UNSPECIFIED;
 
@@ -43,19 +42,20 @@ int gnrc_ipv6_nib_pl_set(unsigned iface,
         ipv6_addr_is_multicast(pfx) || (pref_ltime > valid_ltime)) {
         return -EINVAL;
     }
-    mutex_lock(&_nib_mutex);
+    _nib_acquire();
     dst = _nib_pl_add(iface, pfx, pfx_len, valid_ltime,
                       pref_ltime);
     if (dst == NULL) {
-        res = -ENOMEM;
+        _nib_release();
+        return -ENOMEM;
     }
 #ifdef MODULE_GNRC_NETIF
     gnrc_netif_t *netif = gnrc_netif_get_by_pid(iface);
     int idx;
 
     if (netif == NULL) {
-        mutex_unlock(&_nib_mutex);
-        return res;
+        _nib_release();
+        return 0;
     }
     gnrc_netif_acquire(netif);
     if (!gnrc_netif_is_6ln(netif) &&
@@ -78,12 +78,12 @@ int gnrc_ipv6_nib_pl_set(unsigned iface,
 #endif
     gnrc_netif_release(netif);
 #endif  /* MODULE_GNRC_NETIF */
-    mutex_unlock(&_nib_mutex);
+    _nib_release();
 #if defined(MODULE_GNRC_NETIF) && GNRC_IPV6_NIB_CONF_ROUTER
     /* update prefixes down-stream */
     _handle_snd_mc_ra(netif);
 #endif
-    return res;
+    return 0;
 }
 
 void gnrc_ipv6_nib_pl_del(unsigned iface,
@@ -92,14 +92,14 @@ void gnrc_ipv6_nib_pl_del(unsigned iface,
     _nib_offl_entry_t *dst = NULL;
 
     assert(pfx != NULL);
-    mutex_lock(&_nib_mutex);
+    _nib_acquire();
     while ((dst = _nib_offl_iter(dst)) != NULL) {
         assert(dst->next_hop != NULL);
         if ((pfx_len == dst->pfx_len) &&
             ((iface == 0) || (iface == _nib_onl_get_if(dst->next_hop))) &&
             (ipv6_addr_match_prefix(pfx, &dst->pfx) >= pfx_len)) {
             _nib_pl_remove(dst);
-            mutex_unlock(&_nib_mutex);
+            _nib_release();
 #if GNRC_IPV6_NIB_CONF_ROUTER
             gnrc_netif_t *netif = gnrc_netif_get_by_pid(iface);
 
@@ -111,7 +111,7 @@ void gnrc_ipv6_nib_pl_del(unsigned iface,
             return;
         }
     }
-    mutex_unlock(&_nib_mutex);
+    _nib_release();
 }
 
 bool gnrc_ipv6_nib_pl_iter(unsigned iface, void **state,
@@ -119,7 +119,7 @@ bool gnrc_ipv6_nib_pl_iter(unsigned iface, void **state,
 {
     _nib_offl_entry_t *dst = *state;
 
-    mutex_lock(&_nib_mutex);
+    _nib_acquire();
     while ((dst = _nib_offl_iter(dst)) != NULL) {
         const _nib_onl_entry_t *node = dst->next_hop;
         if ((node != NULL) && (dst->mode & _PL) &&
@@ -133,7 +133,7 @@ bool gnrc_ipv6_nib_pl_iter(unsigned iface, void **state,
             break;
         }
     }
-    mutex_unlock(&_nib_mutex);
+    _nib_release();
     *state = dst;
     return (*state != NULL);
 }

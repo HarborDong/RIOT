@@ -53,6 +53,15 @@ extern "C" {
 /** @} */
 
 /**
+ * @name Pthread configuration
+ * @{
+ */
+/* The idle stack of '160' is not enough to do the 'msg_receive'.
+ * It currently used '164' bytes. */
+#define CONFIG_PTHREAD_REAPER_BASE_STACKSIZE (2*THREAD_STACKSIZE_IDLE)
+/** @} */
+
+/**
  * @name Compiler specifics
  * @{
  */
@@ -61,6 +70,11 @@ extern "C" {
 #define CC_CONF_NONNULL(...)            __attribute__((nonnull(__VA_ARGS__)))
 #define CC_CONF_WARN_UNUSED_RESULT      __attribute__((warn_unused_result))
 /** @} */
+
+/**
+ * @brief   Attribute for memory sections required by SRAM PUF
+ */
+#define PUF_SRAM_ATTRIBUTES __attribute__((used, section(".noinit")))
 
 #ifdef __cplusplus
 }

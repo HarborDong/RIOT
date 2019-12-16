@@ -13,6 +13,8 @@
  * @author  Martine Lenders <m.lenders@fu-berlin.de>
  */
 
+#include <string.h>
+
 #include "net/gnrc/icmpv6.h"
 #include "net/gnrc/ipv6.h"
 #include "net/gnrc/netif/internal.h"
@@ -232,7 +234,7 @@ gnrc_pktsnip_t *gnrc_ndp_opt_rdnss_build(uint32_t ltime, ipv6_addr_t *addrs,
     gnrc_pktsnip_t *pkt = gnrc_ndp_opt_build(NDP_OPT_RDNSS, opt_size, next);
 
     if (pkt != NULL) {
-        ndp_opt_rdnss_t *rdnss_opt = pkt->data;
+        ndp_opt_rdnss_impl_t *rdnss_opt = pkt->data;
         rdnss_opt->resv.u16 = 0;
         rdnss_opt->ltime = byteorder_htonl(ltime);
         for (unsigned i = 0; i < addrs_num; i++) {
@@ -373,7 +375,7 @@ void gnrc_ndp_nbr_adv_send(const ipv6_addr_t *tgt, gnrc_netif_t *netif,
                 pkt = hdr;
             }
         }
-        /* TODO: also check if the node provides proxy servies for tgt */
+        /* TODO: also check if the node provides proxy services for tgt */
         if ((pkt != NULL) &&
             (netif->ipv6.addrs_flags[tgt_idx] &
              GNRC_NETIF_IPV6_ADDRS_FLAGS_ANYCAST)) {
@@ -526,6 +528,9 @@ void gnrc_ndp_rtr_adv_send(gnrc_netif_t *netif, const ipv6_addr_t *src,
         if (netif->flags & GNRC_NETIF_FLAGS_IPV6_ADV_CUR_HL) {
             cur_hl = netif->cur_hl;
         }
+#if GNRC_IPV6_NIB_CONF_ARSM
+        /* netif->ipv6.reach_time_base is only available with Address Resolution
+         * State Machine */
         if (netif->flags & GNRC_NETIF_FLAGS_IPV6_ADV_REACH_TIME) {
             if (netif->ipv6.reach_time_base > (3600 * MS_PER_SEC)) {
                 /* reach_time > 1 hour */
@@ -535,6 +540,7 @@ void gnrc_ndp_rtr_adv_send(gnrc_netif_t *netif, const ipv6_addr_t *src,
                 reach_time = netif->ipv6.reach_time_base;
             }
         }
+#endif /* GNRC_IPV6_NIB_CONF_ARSM */
         if (netif->flags & GNRC_NETIF_FLAGS_IPV6_ADV_RETRANS_TIMER) {
             retrans_timer = netif->ipv6.retrans_time;
         }
@@ -595,7 +601,7 @@ static gnrc_pktsnip_t *_build_headers(gnrc_netif_t *netif,
         DEBUG("ndp: error allocating IPv6 header.\n");
         return NULL;
     }
-    ((ipv6_hdr_t *)iphdr->data)->hl = 255;
+    ((ipv6_hdr_t *)iphdr->data)->hl = NDP_HOP_LIMIT;
     /* add netif header for send interface specification */
     l2hdr = gnrc_netif_hdr_build(NULL, 0, NULL, 0);
     if (l2hdr == NULL) {
@@ -603,7 +609,7 @@ static gnrc_pktsnip_t *_build_headers(gnrc_netif_t *netif,
         gnrc_pktbuf_remove_snip(iphdr, iphdr);
         return NULL;
     }
-    ((gnrc_netif_hdr_t *)l2hdr->data)->if_pid = netif->pid;
+    gnrc_netif_hdr_set_netif(l2hdr->data, netif);
     LL_PREPEND(iphdr, l2hdr);
     return l2hdr;
 }

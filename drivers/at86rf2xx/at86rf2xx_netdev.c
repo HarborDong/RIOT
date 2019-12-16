@@ -19,6 +19,7 @@
  * @author      Kévin Roussel <Kevin.Roussel@inria.fr>
  * @author      Martine Lenders <mlenders@inf.fu-berlin.de>
  * @author      Kaspar Schleiser <kaspar@schleiser.de>
+ * @author      Josua Arndt <jarndt@ias.rwth-aachen.de>
  *
  * @}
  */
@@ -42,8 +43,6 @@
 #define ENABLE_DEBUG (0)
 #include "debug.h"
 
-#define _MAX_MHR_OVERHEAD   (25)
-
 static int _send(netdev_t *netdev, const iolist_t *iolist);
 static int _recv(netdev_t *netdev, void *buf, size_t len, void *info);
 static int _init(netdev_t *netdev);
@@ -60,6 +59,10 @@ const netdev_driver_t at86rf2xx_driver = {
     .set = _set,
 };
 
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+/* SOC has radio interrupts, store reference to netdev */
+static netdev_t *at86rfmega_dev;
+#else
 static void _irq_handler(void *arg)
 {
     netdev_t *dev = (netdev_t *) arg;
@@ -68,11 +71,15 @@ static void _irq_handler(void *arg)
         dev->event_callback(dev, NETDEV_EVENT_ISR);
     }
 }
+#endif
 
 static int _init(netdev_t *netdev)
 {
     at86rf2xx_t *dev = (at86rf2xx_t *)netdev;
 
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+    at86rfmega_dev = netdev;
+#else
     /* initialize GPIOs */
     spi_init_cs(dev->params.spi, dev->params.cs_pin);
     gpio_init(dev->params.sleep_pin, GPIO_OUT);
@@ -81,18 +88,24 @@ static int _init(netdev_t *netdev)
     gpio_set(dev->params.reset_pin);
     gpio_init_int(dev->params.int_pin, GPIO_IN, GPIO_RISING, _irq_handler, dev);
 
-    /* reset device to default values and put it into RX state */
-    at86rf2xx_reset(dev);
+    /* Intentionally check if bus can be acquired,
+       since getbus() drops the return value */
+    if (spi_acquire(dev->params.spi, dev->params.cs_pin, SPI_MODE_0,
+                                                dev->params.spi_clk) < 0) {
+        DEBUG("[at86rf2xx] error: unable to acquire SPI bus\n");
+        return -EIO;
+    }
+    spi_release(dev->params.spi);
+#endif
 
-    /* test if the SPI is set up correctly and the device is responding */
+    /* test if the device is responding */
     if (at86rf2xx_reg_read(dev, AT86RF2XX_REG__PART_NUM) != AT86RF2XX_PARTNUM) {
         DEBUG("[at86rf2xx] error: unable to read correct part number\n");
-        return -1;
+        return -ENOTSUP;
     }
 
-#ifdef MODULE_NETSTATS_L2
-    memset(&netdev->stats, 0, sizeof(netstats_t));
-#endif
+    /* reset device to default values and put it into RX state */
+    at86rf2xx_reset(dev);
 
     return 0;
 }
@@ -112,14 +125,13 @@ static int _send(netdev_t *netdev, const iolist_t *iolist)
                   (unsigned)len + 2);
             return -EOVERFLOW;
         }
-#ifdef MODULE_NETSTATS_L2
-        netdev->stats.tx_bytes += len;
-#endif
-        len = at86rf2xx_tx_load(dev, iol->iol_base, iol->iol_len, len);
+        if (iol->iol_len) {
+            len = at86rf2xx_tx_load(dev, iol->iol_base, iol->iol_len, len);
+        }
     }
 
     /* send data out directly if pre-loading id disabled */
-    if (!(dev->netdev.flags & AT86RF2XX_OPT_PRELOADING)) {
+    if (!(dev->flags & AT86RF2XX_OPT_PRELOADING)) {
         at86rf2xx_tx_exec(dev);
     }
     /* return the number of bytes that were actually loaded into the frame
@@ -133,30 +145,46 @@ static int _recv(netdev_t *netdev, void *buf, size_t len, void *info)
     uint8_t phr;
     size_t pkt_len;
 
-    /* frame buffer protection will be unlocked as soon as at86rf2xx_fb_stop()
-     * is called*/
+    /* frame buffer protection will be unlocked as soon as at86rf2xx_fb_stop() is called,
+     * Set receiver to PLL_ON state to be able to free the SPI bus and avoid losing data. */
+    at86rf2xx_set_state(dev, AT86RF2XX_STATE_PLL_ON);
+
+    /* start frame buffer access */
     at86rf2xx_fb_start(dev);
 
     /* get the size of the received packet */
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+    phr = TST_RX_LENGTH;
+#else
     at86rf2xx_fb_read(dev, &phr, 1);
+#endif
 
-    /* ignore MSB (refer p.80) and substract length of FCS field */
+    /* ignore MSB (refer p.80) and subtract length of FCS field */
     pkt_len = (phr & 0x7f) - 2;
 
-    /* just return length when buf == NULL */
+    /* return length when buf == NULL */
     if (buf == NULL) {
+        /* release SPI bus */
         at86rf2xx_fb_stop(dev);
+
+        /* drop packet, continue receiving */
+        if (len > 0) {
+            /* set device back in operation state which was used before last transmission.
+             * This state is saved in at86rf2xx.c/at86rf2xx_tx_prepare() e.g RX_AACK_ON */
+            at86rf2xx_set_state(dev, dev->idle_state);
+        }
+
         return pkt_len;
     }
+
     /* not enough space in buf */
     if (pkt_len > len) {
         at86rf2xx_fb_stop(dev);
+        /* set device back in operation state which was used before last transmission.
+         * This state is saved in at86rf2xx.c/at86rf2xx_tx_prepare() e.g RX_AACK_ON */
+        at86rf2xx_set_state(dev, dev->idle_state);
         return -ENOBUFS;
     }
-#ifdef MODULE_NETSTATS_L2
-    netdev->stats.rx_count++;
-    netdev->stats.rx_bytes += pkt_len;
-#endif
     /* copy payload */
     at86rf2xx_fb_read(dev, (uint8_t *)buf, pkt_len);
 
@@ -166,22 +194,47 @@ static int _recv(netdev_t *netdev, void *buf, size_t len, void *info)
     at86rf2xx_fb_read(dev, tmp, 2);
     (void)tmp;
 
+    /* AT86RF212B RSSI_BASE_VAL + 1.03 * ED, base varies for diff. modulation and datarates
+     * AT86RF232  RSSI_BASE_VAL + ED, base -91dBm
+     * AT86RF233  RSSI_BASE_VAL + ED, base -94dBm
+     * AT86RF231  RSSI_BASE_VAL + ED, base -91dBm
+     * AT86RFA1   RSSI_BASE_VAL + ED, base -90dBm
+     * AT86RFR2   RSSI_BASE_VAL + ED, base -90dBm
+     *
+     * AT86RF231 MAN. p.92, 8.4.3 Data Interpretation
+     * AT86RF232 MAN. p.91, 8.4.3 Data Interpretation
+     * AT86RF233 MAN. p.102, 8.5.3 Data Interpretation
+     *
+     * for performance reasons we ignore the 1.03 scale factor on the 212B,
+     * which causes a slight error in the values, but the accuracy of the ED
+     * value is specified as +/- 5 dB, so it should not matter very much in real
+     * life.
+     */
     if (info != NULL) {
-        uint8_t rssi = 0;
+        uint8_t ed = 0;
         netdev_ieee802154_rx_info_t *radio_info = info;
         at86rf2xx_fb_read(dev, &(radio_info->lqi), 1);
-#ifndef MODULE_AT86RF231
-        at86rf2xx_fb_read(dev, &(rssi), 1);
+
+#if defined(MODULE_AT86RF231) || defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+        /* AT86RF231 does not provide ED at the end of the frame buffer, read
+         * from separate register instead */
         at86rf2xx_fb_stop(dev);
+        ed = at86rf2xx_reg_read(dev, AT86RF2XX_REG__PHY_ED_LEVEL);
 #else
+        at86rf2xx_fb_read(dev, &ed, 1);
         at86rf2xx_fb_stop(dev);
-        rssi = at86rf2xx_reg_read(dev, AT86RF2XX_REG__PHY_ED_LEVEL);
 #endif
-        radio_info->rssi = RSSI_BASE_VAL + rssi;
+        radio_info->rssi = RSSI_BASE_VAL + ed;
+        DEBUG("[at86rf2xx] LQI:%d high is good, RSSI:%d high is either good or"
+              "too much interference.\n", radio_info->lqi, radio_info->rssi);
     }
     else {
         at86rf2xx_fb_stop(dev);
     }
+
+    /* set device back in operation state which was used before last transmission.
+     * This state is saved in at86rf2xx.c/at86rf2xx_tx_prepare() e.g RX_AACK_ON */
+    at86rf2xx_set_state(dev, dev->idle_state);
 
     return pkt_len;
 }
@@ -199,7 +252,7 @@ static int _set_state(at86rf2xx_t *dev, netopt_state_t state)
             at86rf2xx_set_state(dev, AT86RF2XX_STATE_RX_AACK_ON);
             break;
         case NETOPT_STATE_TX:
-            if (dev->netdev.flags & AT86RF2XX_OPT_PRELOADING) {
+            if (dev->flags & AT86RF2XX_OPT_PRELOADING) {
                 /* The netdev driver ISR switches the transceiver back to the
                  * previous idle state after a completed TX. If the user tries
                  * to initiate another transmission (retransmitting the same data)
@@ -263,18 +316,13 @@ static int _get(netdev_t *netdev, netopt_t opt, void *val, size_t max_len)
             ((uint8_t *)val)[0] = at86rf2xx_get_page(dev);
             return sizeof(uint16_t);
 
-        case NETOPT_MAX_PACKET_SIZE:
-            assert(max_len >= sizeof(int16_t));
-            *((uint16_t *)val) = AT86RF2XX_MAX_PKT_LENGTH - _MAX_MHR_OVERHEAD;
-            return sizeof(uint16_t);
-
         case NETOPT_STATE:
             assert(max_len >= sizeof(netopt_state_t));
             *((netopt_state_t *)val) = _get_state(dev);
             return sizeof(netopt_state_t);
 
         case NETOPT_PRELOADING:
-            if (dev->netdev.flags & AT86RF2XX_OPT_PRELOADING) {
+            if (dev->flags & AT86RF2XX_OPT_PRELOADING) {
                 *((netopt_enable_t *)val) = NETOPT_ENABLE;
             }
             else {
@@ -283,7 +331,7 @@ static int _get(netdev_t *netdev, netopt_t opt, void *val, size_t max_len)
             return sizeof(netopt_enable_t);
 
         case NETOPT_PROMISCUOUSMODE:
-            if (dev->netdev.flags & AT86RF2XX_OPT_PROMISCUOUS) {
+            if (dev->flags & AT86RF2XX_OPT_PROMISCUOUS) {
                 *((netopt_enable_t *)val) = NETOPT_ENABLE;
             }
             else {
@@ -293,27 +341,27 @@ static int _get(netdev_t *netdev, netopt_t opt, void *val, size_t max_len)
 
         case NETOPT_RX_START_IRQ:
             *((netopt_enable_t *)val) =
-                !!(dev->netdev.flags & AT86RF2XX_OPT_TELL_RX_START);
+                !!(dev->flags & AT86RF2XX_OPT_TELL_RX_START);
             return sizeof(netopt_enable_t);
 
         case NETOPT_RX_END_IRQ:
             *((netopt_enable_t *)val) =
-                !!(dev->netdev.flags & AT86RF2XX_OPT_TELL_RX_END);
+                !!(dev->flags & AT86RF2XX_OPT_TELL_RX_END);
             return sizeof(netopt_enable_t);
 
         case NETOPT_TX_START_IRQ:
             *((netopt_enable_t *)val) =
-                !!(dev->netdev.flags & AT86RF2XX_OPT_TELL_TX_START);
+                !!(dev->flags & AT86RF2XX_OPT_TELL_TX_START);
             return sizeof(netopt_enable_t);
 
         case NETOPT_TX_END_IRQ:
             *((netopt_enable_t *)val) =
-                !!(dev->netdev.flags & AT86RF2XX_OPT_TELL_TX_END);
+                !!(dev->flags & AT86RF2XX_OPT_TELL_TX_END);
             return sizeof(netopt_enable_t);
 
         case NETOPT_CSMA:
             *((netopt_enable_t *)val) =
-                !!(dev->netdev.flags & AT86RF2XX_OPT_CSMA);
+                !!(dev->flags & AT86RF2XX_OPT_CSMA);
             return sizeof(netopt_enable_t);
 
 /* Only radios with the XAH_CTRL_2 register support frame retry reporting */
@@ -421,13 +469,13 @@ static int _set(netdev_t *netdev, netopt_t opt, const void *val, size_t len)
 
     switch (opt) {
         case NETOPT_ADDRESS:
-            assert(len <= sizeof(uint16_t));
-            at86rf2xx_set_addr_short(dev, *((const uint16_t *)val));
+            assert(len >= sizeof(network_uint16_t));
+            at86rf2xx_set_addr_short(dev, val);
             /* don't set res to set netdev_ieee802154_t::short_addr */
             break;
         case NETOPT_ADDRESS_LONG:
-            assert(len <= sizeof(uint64_t));
-            at86rf2xx_set_addr_long(dev, *((const uint64_t *)val));
+            assert(len >= sizeof(eui64_t));
+            at86rf2xx_set_addr_long(dev, val);
             /* don't set res to set netdev_ieee802154_t::long_addr */
             break;
         case NETOPT_NID:
@@ -545,7 +593,7 @@ static int _set(netdev_t *netdev, netopt_t opt, const void *val, size_t len)
 
         case NETOPT_CSMA_RETRIES:
             assert(len <= sizeof(uint8_t));
-            if (!(dev->netdev.flags & AT86RF2XX_OPT_CSMA) ||
+            if (!(dev->flags & AT86RF2XX_OPT_CSMA) ||
                 (*((uint8_t *)val) > 5)) {
                 /* If CSMA is disabled, don't allow setting retries */
                 res = -EINVAL;
@@ -595,7 +643,12 @@ static void _isr(netdev_t *netdev)
     }
 
     /* read (consume) device status */
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+    irq_mask = dev->irq_status;
+    dev->irq_status = 0;
+#else
     irq_mask = at86rf2xx_reg_read(dev, AT86RF2XX_REG__IRQ_STATUS);
+#endif
 
     trac_status = at86rf2xx_reg_read(dev, AT86RF2XX_REG__TRX_STATE)
                   & AT86RF2XX_TRX_STATE_MASK__TRAC;
@@ -609,7 +662,7 @@ static void _isr(netdev_t *netdev)
         if ((state == AT86RF2XX_STATE_RX_AACK_ON)
             || (state == AT86RF2XX_STATE_BUSY_RX_AACK)) {
             DEBUG("[at86rf2xx] EVT - RX_END\n");
-            if (!(dev->netdev.flags & AT86RF2XX_OPT_TELL_RX_END)) {
+            if (!(dev->flags & AT86RF2XX_OPT_TELL_RX_END)) {
                 return;
             }
             netdev->event_callback(netdev, NETDEV_EVENT_RX_COMPLETE);
@@ -632,7 +685,7 @@ static void _isr(netdev_t *netdev)
 
             DEBUG("[at86rf2xx] EVT - TX_END\n");
 
-            if (netdev->event_callback && (dev->netdev.flags & AT86RF2XX_OPT_TELL_TX_END)) {
+            if (netdev->event_callback && (dev->flags & AT86RF2XX_OPT_TELL_TX_END)) {
                 switch (trac_status) {
 #ifdef MODULE_OPENTHREAD
                     case AT86RF2XX_TRX_STATE__TRAC_SUCCESS:
@@ -666,3 +719,74 @@ static void _isr(netdev_t *netdev)
         }
     }
 }
+
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+
+/**
+ * @brief ISR for transceiver's receive end interrupt
+ *
+ *  Is triggered when valid data is received. FCS check passed.
+ *  Save IRQ status and inform upper layer of data reception.
+ *
+ * Flow Diagram Manual p. 52 / 63
+ */
+ISR(TRX24_RX_END_vect, ISR_BLOCK)
+{
+    atmega_enter_isr();
+
+    uint8_t status = *AT86RF2XX_REG__TRX_STATE & AT86RF2XX_TRX_STATUS_MASK__TRX_STATUS;
+    DEBUG("TRX24_RX_END 0x%x\n", status);
+
+    ((at86rf2xx_t *)at86rfmega_dev)->irq_status |= AT86RF2XX_IRQ_STATUS_MASK__RX_END;
+    /* Call upper layer to process received data */
+    at86rfmega_dev->event_callback(at86rfmega_dev, NETDEV_EVENT_ISR);
+
+    atmega_exit_isr();
+}
+
+/**
+ * @brief  Transceiver Frame Address Match, indicates incoming frame
+ *
+ *  Is triggered when Frame with valid Address is received.
+ *  Can be used to wake up MCU from sleep, etc.
+ *
+ * Flow Diagram Manual p. 52 / 63
+ */
+ISR(TRX24_XAH_AMI_vect, ISR_BLOCK)
+{
+    atmega_enter_isr();
+
+    DEBUG("TRX24_XAH_AMI\n");
+    ((at86rf2xx_t *)at86rfmega_dev)->irq_status |= AT86RF2XX_IRQ_STATUS_MASK__AMI;
+
+    atmega_exit_isr();
+}
+
+/**
+ * @brief ISR for transceiver's transmit end interrupt
+ *
+ *  Is triggered when data or when acknowledge frames where send.
+ *
+ * Flow Diagram Manual p. 52 / 63
+ */
+ISR(TRX24_TX_END_vect, ISR_BLOCK)
+{
+    atmega_enter_isr();
+
+    at86rf2xx_t *dev = (at86rf2xx_t *) at86rfmega_dev;
+    uint8_t status = *AT86RF2XX_REG__TRX_STATE & AT86RF2XX_TRX_STATUS_MASK__TRX_STATUS;
+    DEBUG("TRX24_TX_END 0x%x\n", status);
+
+    /* only inform upper layer when a transmission was done,
+     * not for sending acknowledge frames if data was received. */
+    if (status != AT86RF2XX_STATE_RX_AACK_ON) {
+        dev->irq_status |= AT86RF2XX_IRQ_STATUS_MASK__TX_END;
+
+        /* Call upper layer to process if data was send successful */
+        at86rfmega_dev->event_callback(at86rfmega_dev, NETDEV_EVENT_ISR);
+    }
+
+    atmega_exit_isr();
+}
+
+#endif /* MODULE_AT86RFA1 || MODULE_AT86RFR2 */

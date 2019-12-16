@@ -42,12 +42,49 @@ void at86rf2xx_setup(at86rf2xx_t *dev, const at86rf2xx_params_t *params)
     netdev_t *netdev = (netdev_t *)dev;
 
     netdev->driver = &at86rf2xx_driver;
-    /* initialize device descriptor */
-    memcpy(&dev->params, params, sizeof(at86rf2xx_params_t));
+    /* State to return after receiving or transmitting */
     dev->idle_state = AT86RF2XX_STATE_TRX_OFF;
     /* radio state is P_ON when first powered-on */
     dev->state = AT86RF2XX_STATE_P_ON;
     dev->pending_tx = 0;
+
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+    (void) params;
+    /* set all interrupts off */
+    at86rf2xx_reg_write(dev, AT86RF2XX_REG__IRQ_MASK, 0x00);
+#else
+    /* initialize device descriptor */
+    dev->params = *params;
+#endif
+}
+
+static void at86rf2xx_disable_clock_output(at86rf2xx_t *dev)
+{
+#if defined(MODULE_AT86RFA1) || defined(MODULE_AT86RFR2)
+    (void) dev;
+#else
+    uint8_t tmp = at86rf2xx_reg_read(dev, AT86RF2XX_REG__TRX_CTRL_0);
+    tmp &= ~(AT86RF2XX_TRX_CTRL_0_MASK__CLKM_CTRL);
+    tmp &= ~(AT86RF2XX_TRX_CTRL_0_MASK__CLKM_SHA_SEL);
+    tmp |= (AT86RF2XX_TRX_CTRL_0_CLKM_CTRL__OFF);
+    at86rf2xx_reg_write(dev, AT86RF2XX_REG__TRX_CTRL_0, tmp);
+#endif
+}
+
+static void at86rf2xx_enable_smart_idle(at86rf2xx_t *dev)
+{
+#if AT86RF2XX_SMART_IDLE_LISTENING
+    uint8_t tmp = at86rf2xx_reg_read(dev, AT86RF2XX_REG__TRX_RPC);
+    tmp |= (AT86RF2XX_TRX_RPC_MASK__RX_RPC_EN |
+            AT86RF2XX_TRX_RPC_MASK__PDT_RPC_EN |
+            AT86RF2XX_TRX_RPC_MASK__PLL_RPC_EN |
+            AT86RF2XX_TRX_RPC_MASK__XAH_TX_RPC_EN |
+            AT86RF2XX_TRX_RPC_MASK__IPAN_RPC_EN);
+    at86rf2xx_reg_write(dev, AT86RF2XX_REG__TRX_RPC, tmp);
+    at86rf2xx_set_rxsensitivity(dev, RSSI_BASE_VAL);
+#else
+    (void) dev;
+#endif
 }
 
 void at86rf2xx_reset(at86rf2xx_t *dev)
@@ -69,11 +106,9 @@ void at86rf2xx_reset(at86rf2xx_t *dev)
     addr_long.uint8[0] &= ~(0x01);
     addr_long.uint8[0] |=  (0x02);
     /* set short and long address */
-    at86rf2xx_set_addr_long(dev, ntohll(addr_long.uint64.u64));
-    at86rf2xx_set_addr_short(dev, ntohs(addr_long.uint16[0].u16));
+    at86rf2xx_set_addr_long(dev, &addr_long);
+    at86rf2xx_set_addr_short(dev, &addr_long.uint16[ARRAY_SIZE(addr_long.uint16) - 1]);
 
-    /* set default PAN id */
-    at86rf2xx_set_pan(dev, AT86RF2XX_DEFAULT_PANID);
     /* set default channel */
     at86rf2xx_set_chan(dev, AT86RF2XX_DEFAULT_CHANNEL);
     /* set default TX power */
@@ -82,6 +117,10 @@ void at86rf2xx_reset(at86rf2xx_t *dev)
     at86rf2xx_set_option(dev, AT86RF2XX_OPT_AUTOACK, true);
     at86rf2xx_set_option(dev, AT86RF2XX_OPT_CSMA, true);
 
+    static const netopt_enable_t enable = NETOPT_ENABLE;
+    netdev_ieee802154_set(&dev->netdev, NETOPT_ACK_REQ,
+                          &enable, sizeof(enable));
+
     /* enable safe mode (protect RX FIFO until reading data starts) */
     at86rf2xx_reg_write(dev, AT86RF2XX_REG__TRX_CTRL_2,
                         AT86RF2XX_TRX_CTRL_2_MASK__RX_SAFE_MODE);
@@ -89,17 +128,18 @@ void at86rf2xx_reset(at86rf2xx_t *dev)
     at86rf2xx_set_page(dev, AT86RF2XX_DEFAULT_PAGE);
 #endif
 
+#if !defined(MODULE_AT86RFA1) && !defined(MODULE_AT86RFR2)
     /* don't populate masked interrupt flags to IRQ_STATUS register */
     uint8_t tmp = at86rf2xx_reg_read(dev, AT86RF2XX_REG__TRX_CTRL_1);
     tmp &= ~(AT86RF2XX_TRX_CTRL_1_MASK__IRQ_MASK_MODE);
     at86rf2xx_reg_write(dev, AT86RF2XX_REG__TRX_CTRL_1, tmp);
+#endif
+
+    /* configure smart idle listening feature */
+    at86rf2xx_enable_smart_idle(dev);
 
     /* disable clock output to save power */
-    tmp = at86rf2xx_reg_read(dev, AT86RF2XX_REG__TRX_CTRL_0);
-    tmp &= ~(AT86RF2XX_TRX_CTRL_0_MASK__CLKM_CTRL);
-    tmp &= ~(AT86RF2XX_TRX_CTRL_0_MASK__CLKM_SHA_SEL);
-    tmp |= (AT86RF2XX_TRX_CTRL_0_CLKM_CTRL__OFF);
-    at86rf2xx_reg_write(dev, AT86RF2XX_REG__TRX_CTRL_0, tmp);
+    at86rf2xx_disable_clock_output(dev);
 
     /* enable interrupts */
     at86rf2xx_reg_write(dev, AT86RF2XX_REG__IRQ_MASK,
@@ -107,6 +147,8 @@ void at86rf2xx_reset(at86rf2xx_t *dev)
     /* clear interrupt flags */
     at86rf2xx_reg_read(dev, AT86RF2XX_REG__IRQ_STATUS);
 
+    /* State to return after receiving or transmitting */
+    dev->idle_state = AT86RF2XX_STATE_RX_AACK_ON;
     /* go into RX state */
     at86rf2xx_set_state(dev, AT86RF2XX_STATE_RX_AACK_ON);
 
@@ -156,7 +198,7 @@ void at86rf2xx_tx_exec(const at86rf2xx_t *dev)
     at86rf2xx_reg_write(dev, AT86RF2XX_REG__TRX_STATE,
                         AT86RF2XX_TRX_STATE__TX_START);
     if (netdev->event_callback &&
-        (dev->netdev.flags & AT86RF2XX_OPT_TELL_TX_START)) {
+        (dev->flags & AT86RF2XX_OPT_TELL_TX_START)) {
         netdev->event_callback(netdev, NETDEV_EVENT_TX_STARTED);
     }
 }

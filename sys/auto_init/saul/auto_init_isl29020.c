@@ -21,6 +21,7 @@
 
 #ifdef MODULE_ISL29020
 
+#include "assert.h"
 #include "log.h"
 #include "saul_reg.h"
 #include "isl29020.h"
@@ -29,7 +30,7 @@
 /**
  * @brief   Define the number of configured sensors
  */
-#define ISL29020_NUM    (sizeof(isl29020_params) / sizeof(isl29020_params[0]))
+#define ISL29020_NUM    ARRAY_SIZE(isl29020_params)
 
 /**
  * @brief   Allocate memory for the device descriptors
@@ -44,7 +45,7 @@ static saul_reg_t saul_entries[ISL29020_NUM];
 /**
  * @brief   Define the number of saul info
  */
-#define ISL29020_INFO_NUM    (sizeof(isl29020_saul_info) / sizeof(isl29020_saul_info[0]))
+#define ISL29020_INFO_NUM    ARRAY_SIZE(isl29020_saul_info)
 
 /**
  * @brief   Reference the driver struct

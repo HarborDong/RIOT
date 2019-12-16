@@ -29,6 +29,7 @@
 #include "random.h"
 #include "periph/rtt.h"
 #include "net/gnrc/netif.h"
+#include "net/gnrc/netif/hdr.h"
 #include "net/gnrc/netif/internal.h"
 #include "net/gnrc/netif/ieee802154.h"
 #include "net/netdev/ieee802154.h"
@@ -173,7 +174,7 @@ static gnrc_pktsnip_t *_recv(gnrc_netif_t *netif)
 
             hdr->lqi = rx_info.lqi;
             hdr->rssi = rx_info.rssi;
-            hdr->if_pid = thread_getpid();
+            gnrc_netif_hdr_set_netif(hdr, netif);
             pkt->type = state->proto;
 #if ENABLE_DEBUG
             DEBUG("_recv_ieee802154: received packet from %s of length %u\n",
@@ -265,14 +266,6 @@ void lwmac_set_state(gnrc_netif_t *netif, gnrc_lwmac_state_t newstate)
         case GNRC_LWMAC_TRANSMITTING: {
             /* Enable duty cycling again */
             rtt_handler(GNRC_LWMAC_EVENT_RTT_RESUME, netif);
-#if (GNRC_LWMAC_ENABLE_DUTYCYLE_RECORD == 1)
-            /* Output duty-cycle ratio */
-            uint64_t duty;
-            duty = (uint64_t) rtt_get_counter();
-            duty = ((uint64_t) netif->mac.prot.lwmac.awake_duration_sum_ticks) * 100 /
-                   (duty - (uint64_t)netif->mac.prot.lwmac.system_start_time_ticks);
-            printf("[LWMAC]: achieved duty-cycle: %lu %% \n", (uint32_t)duty);
-#endif
             break;
         }
         case GNRC_LWMAC_SLEEPING: {
@@ -683,7 +676,7 @@ static void rtt_cb(void *arg)
 {
     msg_t msg;
 
-    msg.content.value = ((uint32_t) arg) & 0xffff;
+    msg.content.value = (uint16_t)((uintptr_t) arg);
     msg.type = GNRC_LWMAC_EVENT_RTT_TYPE;
     msg_send(&msg, lwmac_pid);
 
@@ -834,7 +827,7 @@ static void _lwmac_event_cb(netdev_t *dev, netdev_event_t event)
         }
     }
 
-    /* Execute main state machine because something just happend*/
+    /* Execute main state machine because something just happened*/
     while (gnrc_lwmac_get_reschedule(netif)) {
         lwmac_update(netif);
     }
@@ -850,7 +843,7 @@ static int _send(gnrc_netif_t *netif, gnrc_pktsnip_t *pkt)
 
     lwmac_schedule_update(netif);
 
-    /* Execute main state machine because something just happend*/
+    /* Execute main state machine because something just happened*/
     while (gnrc_lwmac_get_reschedule(netif)) {
         lwmac_update(netif);
     }
@@ -879,7 +872,16 @@ static void _lwmac_msg_handler(gnrc_netif_t *netif, msg_t *msg)
             lwmac_schedule_update(netif);
             break;
         }
-
+#if (GNRC_MAC_ENABLE_DUTYCYCLE_RECORD == 1)
+        case GNRC_MAC_TYPE_GET_DUTYCYCLE: {
+            /* Output LWMAC's radio duty-cycle ratio */
+            uint64_t duty = (uint64_t) rtt_get_counter();
+            duty = ((uint64_t) netif->mac.prot.lwmac.awake_duration_sum_ticks) * 100 /
+                   (duty - (uint64_t)netif->mac.prot.lwmac.system_start_time_ticks);
+            printf("[LWMAC]: achieved radio duty-cycle: %u %% \n", (unsigned) duty);
+            break;
+        }
+#endif
         default: {
 #if ENABLE_DEBUG
             DEBUG("[LWMAC]: unknown message type 0x%04x"
@@ -889,7 +891,7 @@ static void _lwmac_msg_handler(gnrc_netif_t *netif, msg_t *msg)
         }
     }
 
-    /* Execute main state machine because something just happend*/
+    /* Execute main state machine because something just happened*/
     while (gnrc_lwmac_get_reschedule(netif)) {
         lwmac_update(netif);
     }
@@ -899,6 +901,7 @@ static void _lwmac_init(gnrc_netif_t *netif)
 {
     netdev_t *dev;
 
+    gnrc_netif_default_init(netif);
     dev = netif->dev;
     dev->event_callback = _lwmac_event_cb;
 
@@ -932,7 +935,7 @@ static void _lwmac_init(gnrc_netif_t *netif)
     /* Start duty cycling */
     lwmac_set_state(netif, GNRC_LWMAC_START);
 
-#if (GNRC_LWMAC_ENABLE_DUTYCYLE_RECORD == 1)
+#if (GNRC_MAC_ENABLE_DUTYCYCLE_RECORD == 1)
     /* Start duty cycle recording */
     netif->mac.prot.lwmac.system_start_time_ticks = rtt_get_counter();
     netif->mac.prot.lwmac.last_radio_on_time_ticks = netif->mac.prot.lwmac.system_start_time_ticks;

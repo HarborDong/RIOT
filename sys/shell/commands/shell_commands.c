@@ -29,7 +29,7 @@ extern int _reboot_handler(int argc, char **argv);
 extern int _id_handler(int argc, char **argv);
 #endif
 
-#ifdef MODULE_LPC_COMMON
+#ifdef MODULE_HEAP_CMD
 extern int _heap_handler(int argc, char **argv);
 #endif
 
@@ -42,11 +42,6 @@ extern int _get_temperature_handler(int argc, char **argv);
 extern int _get_humidity_handler(int argc, char **argv);
 extern int _get_weather_handler(int argc, char **argv);
 extern int _sht_config_handler(int argc, char **argv);
-#endif
-
-#ifdef MODULE_LTC4150
-extern int _get_current_handler(int argc, char **argv);
-extern int _reset_current_handler(int argc, char **argv);
 #endif
 
 #ifdef MODULE_AT30TSE75X
@@ -71,7 +66,7 @@ extern int _read_bytes(int argc, char **argv);
 
 #ifdef MODULE_GNRC_ICMPV6_ECHO
 #ifdef MODULE_XTIMER
-extern int _icmpv6_ping(int argc, char **argv);
+extern int _gnrc_icmpv6_ping(int argc, char **argv);
 #endif
 #endif
 
@@ -122,6 +117,12 @@ extern int _gnrc_6ctx(int argc, char **argv);
 #endif
 #endif
 
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_STATS
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_STATS
+extern int _gnrc_6lo_frag_stats(int argc, char **argv);
+#endif
+#endif
+
 #ifdef MODULE_CCN_LITE_UTILS
 extern int _ccnl_open(int argc, char **argv);
 extern int _ccnl_content(int argc, char **argv);
@@ -142,13 +143,42 @@ extern int _ls_handler(int argc, char **argv);
 extern int _can_handler(int argc, char **argv);
 #endif
 
+#ifdef MODULE_CORD_EP
+extern int _cord_ep_handler(int argc, char **argv);
+#endif
+
+#ifdef MODULE_APP_METADATA
+extern int _app_metadata_handler(int argc, char **argv);
+#endif
+
+#ifdef MODULE_I2C_SCAN
+extern int _i2c_scan(int argc, char **argv);
+#endif
+
+#ifdef MODULE_SEMTECH_LORAMAC
+extern int _loramac_handler(int argc, char **argv);
+#endif
+
+#ifdef MODULE_NIMBLE_NETIF
+extern int _nimble_netif_handler(int argc, char **argv);
+#endif
+
+#ifdef MODULE_TEST_UTILS_INTERACTIVE_SYNC
+extern int _test_start(int argc, char **argv);
+extern int _test_ready(int argc, char **argv);
+#endif
+
+#ifdef MODULE_SUIT_COAP
+extern int _suit_handler(int argc, char **argv);
+#endif
+
 const shell_command_t _shell_command_list[] = {
     {"reboot", "Reboot the node", _reboot_handler},
 #ifdef MODULE_CONFIG
     {"id", "Gets or sets the node's id.", _id_handler},
 #endif
-#ifdef MODULE_LPC_COMMON
-    {"heap", "Shows the heap state for the LPC2387 on the command shell.", _heap_handler},
+#ifdef MODULE_HEAP_CMD
+    {"heap", "Prints heap statistics.", _heap_handler},
 #endif
 #ifdef MODULE_PS
     {"ps", "Prints information about running threads.", _ps_handler},
@@ -158,10 +188,6 @@ const shell_command_t _shell_command_list[] = {
     {"hum", "Prints measured humidity.", _get_humidity_handler},
     {"weather", "Prints measured humidity and temperature.", _get_weather_handler},
     {"sht-config", "Get/set SHT10/11/15 sensor configuration.", _sht_config_handler},
-#endif
-#ifdef MODULE_LTC4150
-    {"cur", "Prints current and average power consumption.", _get_current_handler},
-    {"rstcur", "Resets coulomb counter.", _reset_current_handler},
 #endif
 #ifdef MODULE_AT30TSE75X
     {"at30tse75x", "Test AT30TSE75X temperature sensor", _at30tse75x_handler},
@@ -175,7 +201,7 @@ const shell_command_t _shell_command_list[] = {
 #endif
 #ifdef MODULE_GNRC_ICMPV6_ECHO
 #ifdef MODULE_XTIMER
-    { "ping6", "Ping via ICMPv6", _icmpv6_ping },
+    { "ping6", "Ping via ICMPv6", _gnrc_icmpv6_ping },
 #endif
 #endif
 #ifdef MODULE_RANDOM
@@ -214,6 +240,9 @@ const shell_command_t _shell_command_list[] = {
     {"6ctx", "6LoWPAN context configuration tool", _gnrc_6ctx },
 #endif
 #endif
+#ifdef MODULE_GNRC_SIXLOWPAN_FRAG_STATS
+    {"6lo_frag", "6LoWPAN fragment statistics", _gnrc_6lo_frag_stats },
+#endif
 #ifdef MODULE_SAUL_REG
     {"saul", "interact with sensors and actuators using SAUL", _saul },
 #endif
@@ -232,6 +261,28 @@ const shell_command_t _shell_command_list[] = {
 #endif
 #ifdef MODULE_CONN_CAN
     {"can", "CAN commands", _can_handler},
+#endif
+#ifdef MODULE_CORD_EP
+    {"cord_ep", "Resource directory endpoint commands", _cord_ep_handler },
+#endif
+#ifdef MODULE_APP_METADATA
+    {"app_metadata", "Returns application metadata", _app_metadata_handler },
+#endif
+#ifdef MODULE_I2C_SCAN
+    { "i2c_scan", "Performs an I2C bus scan", _i2c_scan },
+#endif
+#ifdef MODULE_SEMTECH_LORAMAC
+    {"loramac", "Control Semtech loramac stack", _loramac_handler},
+#endif
+#ifdef MODULE_NIMBLE_NETIF
+    { "ble", "Manage BLE connections for NimBLE", _nimble_netif_handler },
+#endif
+#ifdef MODULE_TEST_UTILS_INTERACTIVE_SYNC
+    { "r", "Test sync, Ready query", _test_ready },
+    { "s", "Test sync, Start test trigger", _test_start },
+#endif
+#ifdef MODULE_SUIT_COAP
+    { "suit", "Trigger a SUIT firmware update", _suit_handler },
 #endif
     {NULL, NULL, NULL}
 };

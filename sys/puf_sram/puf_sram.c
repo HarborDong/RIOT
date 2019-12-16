@@ -19,13 +19,13 @@
 #include "puf_sram.h"
 
 /* Allocation of the PUF seed variable */
-__attribute__((used,section(".puf"))) uint32_t puf_sram_seed;
+PUF_SRAM_ATTRIBUTES uint32_t puf_sram_seed;
 
 /* Allocation of the PUF seed state */
-__attribute__((used,section(".puf"))) uint32_t puf_sram_state;
+PUF_SRAM_ATTRIBUTES uint32_t puf_sram_state;
 
 /* Allocation of the memory marker */
-__attribute__((used,section(".puf"))) uint32_t puf_sram_marker;
+PUF_SRAM_ATTRIBUTES uint32_t puf_sram_marker;
 
 void puf_sram_init(const uint8_t *ram, size_t len)
 {
@@ -40,7 +40,7 @@ void puf_sram_generate(const uint8_t *ram, size_t len)
     puf_sram_seed = dek_hash(ram, len);
     /* write marker to a defined section for subsequent reset detection */
     puf_sram_marker = PUF_SRAM_MARKER;
-    /* seting state to 0 means seed was generated from SRAM pattern */
+    /* setting state to 0 means seed was generated from SRAM pattern */
     puf_sram_state = 0;
 }
 
